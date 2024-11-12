@@ -23,10 +23,6 @@ import (
 	"k8s.io/klog/v2"
 )
 
-const (
-	MemcacheDBItemKeyName attribute.Key = "db.memcached.item"
-)
-
 var (
 	tracer func(containerId string) trace.Tracer
 )
@@ -81,26 +77,30 @@ type SpanBuilder struct {
 	commonAttrs []attribute.KeyValue
 }
 
-func NewSpanBuilder(containerId string, destination netaddr.IPPort, rawEvent *ebpftracer.Event) *SpanBuilder {
+func NewSpanBuilder(containerId string, source, destination netaddr.IPPort, rawEvent *ebpftracer.Event) *SpanBuilder {
 	if tracer == nil {
 		return nil
 	}
 	return &SpanBuilder{containerId: containerId, destination: destination, commonAttrs: []attribute.KeyValue{
+		semconv.NetSockHostAddr(source.String()),
 		semconv.NetPeerName(destination.IP().String()),
-		semconv.NetPeerPort(int(destination.Port())),
+		semconv.NetSockPeerAddr(destination.String()), // 不用 NetPeerPort，因为它会被 NetSockPeerAddr 包含。
 		attribute.String("tgid_req_cs", strconv.FormatUint(rawEvent.TgidReqCs, 10)),
 		attribute.String("tgid_resp_cs", strconv.FormatUint(rawEvent.TgidRespCs, 10)),
 	}}
 }
 
 func (t *SpanBuilder) createSpan(name string, duration time.Duration, error bool, attrs ...attribute.KeyValue) {
-	end := time.Now() // todo 不管之前如何滥用时间字段，这里完全在使用 process time，这一点可以使用 event time，因为中间会存在 agent 处理耗时。
+	// todo 不管之前如何滥用时间字段，这里完全在使用 process time，这一点可以使用 event time，因为中间会存在 agent 处理耗时。
+	end := time.Now()
 	start := end.Add(-duration)
 	_, span := tracer(t.containerId).Start(context.Background(), name, trace.WithTimestamp(start), trace.WithSpanKind(trace.SpanKindClient))
 	span.SetAttributes(attrs...)
 	span.SetAttributes(t.commonAttrs...)
 	if error {
 		span.SetStatus(codes.Error, "")
+	} else {
+		span.SetStatus(codes.Ok, "")
 	}
 	span.End(trace.WithTimestamp(end))
 }
@@ -109,7 +109,9 @@ func (t *SpanBuilder) HttpRequest(method, path string, status l7.Status, duratio
 	if t == nil || method == "" {
 		return
 	}
-	t.createSpan(method, duration, status >= 400,
+	t.createSpan(fmt.Sprintf("%s %s", method, path),
+		duration,
+		status >= 400,
 		semconv.HTTPURL(fmt.Sprintf("http://%s%s", t.destination.String(), path)),
 		semconv.HTTPMethod(method),
 		semconv.HTTPStatusCode(int(status)),
@@ -121,7 +123,7 @@ func (t *SpanBuilder) Http2Request(method, path, scheme string, status l7.Status
 		return
 	}
 	if method == "" {
-		method = "unknown"
+		method = "UNKNOWN"
 	}
 	if path == "" {
 		path = "/unknown"
@@ -129,7 +131,9 @@ func (t *SpanBuilder) Http2Request(method, path, scheme string, status l7.Status
 	if scheme == "" {
 		scheme = "unknown"
 	}
-	t.createSpan(method, duration, status > 400,
+	t.createSpan(fmt.Sprintf("%s %s", method, path),
+		duration,
+		status > 400,
 		semconv.HTTPURL(fmt.Sprintf("%s://%s%s", scheme, t.destination.String(), path)),
 		semconv.HTTPMethod(method),
 		semconv.HTTPStatusCode(int(status)),
@@ -142,6 +146,7 @@ func (t *SpanBuilder) PostgresQuery(query string, error bool, duration time.Dura
 	}
 	t.createSpan("query", duration, error,
 		semconv.DBSystemPostgreSQL,
+		// todo 轻解析 SQL 知道 CRUD 操作类型。
 		semconv.DBStatement(query),
 	)
 }
@@ -152,6 +157,7 @@ func (t *SpanBuilder) MysqlQuery(query string, error bool, duration time.Duratio
 	}
 	t.createSpan("query", duration, error,
 		semconv.DBSystemMySQL,
+		// todo 轻解析 SQL 知道 CRUD 操作类型。
 		semconv.DBStatement(query),
 	)
 }
@@ -162,6 +168,7 @@ func (t *SpanBuilder) MongoQuery(query string, error bool, duration time.Duratio
 	}
 	t.createSpan("query", duration, error,
 		semconv.DBSystemMongoDB,
+		// todo 轻解析 SQL 知道 CRUD 操作类型。
 		semconv.DBStatement(query),
 	)
 }
@@ -174,6 +181,7 @@ func (t *SpanBuilder) MemcachedQuery(cmd string, items []string, error bool, dur
 		semconv.DBSystemMemcached,
 		semconv.DBOperation(cmd),
 	}
+	var MemcacheDBItemKeyName attribute.Key = "db.memcached.item"
 	if len(items) == 1 {
 		attrs = append(attrs, MemcacheDBItemKeyName.String(items[0]))
 	} else if len(items) > 1 {

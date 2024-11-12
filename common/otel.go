@@ -13,13 +13,15 @@ var (
 )
 
 func ContainerIdToOtelServiceName(containerId string) string {
-	if !strings.HasPrefix(containerId, "/k8s/") {
-		return containerId
-	}
-	for _, r := range []*regexp.Regexp{deploymentPodRegex, daemonsetPodRegex, statefulsetPodRegex, cronjobPodRegex} {
-		if g := r.FindStringSubmatch(containerId); len(g) == 2 {
-			return g[1]
+	// 对 k8s 容器做特殊处理，将 pod 名称作为 service name·
+	if strings.HasPrefix(containerId, "/k8s/") {
+		for _, r := range []*regexp.Regexp{deploymentPodRegex, daemonsetPodRegex, statefulsetPodRegex, cronjobPodRegex} {
+			if g := r.FindStringSubmatch(containerId); len(g) == 2 {
+				return g[1]
+			}
 		}
 	}
+	// 对 docker 容器不做处理，将 container id 作为 service name。
+	// 对于其他类型的容器，也不做处理，将 container id 作为 service name。
 	return containerId
 }

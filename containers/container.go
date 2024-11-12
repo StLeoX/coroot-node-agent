@@ -72,6 +72,7 @@ type AddrPair struct {
 }
 
 type ActiveConnection struct {
+	Src        netaddr.IPPort
 	Dest       netaddr.IPPort
 	ActualDest netaddr.IPPort
 	Pid        uint32
@@ -561,6 +562,7 @@ func (c *Container) onConnectionOpen(pid uint32, fd uint64, src, dst netaddr.IPP
 		stats.Count++
 		stats.TotalTime += duration
 		connection := &ActiveConnection{
+			Src:        src,
 			Dest:       dst,
 			ActualDest: *actualDst,
 			Pid:        pid,
@@ -707,7 +709,7 @@ func (c *Container) onL7Request(pid uint32, fd uint64, connectionTimestamp uint6
 		return nil
 	}
 	stats := c.l7Stats.get(r.Protocol, conn.Dest, conn.ActualDest)
-	trace := tracing.NewSpanBuilder(string(c.id), conn.ActualDest, rawEvent)
+	trace := tracing.NewSpanBuilder(string(c.id), conn.Src, conn.ActualDest, rawEvent)
 
 	switch r.Protocol {
 	// sort `case` by protocol's statistics distribution
