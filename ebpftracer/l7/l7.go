@@ -145,6 +145,6 @@ type Request struct {
 	Protocol Protocol
 	Method   Method
 	Status   Status
-	Duration time.Duration
+	Duration time.Duration // nanoseconds
 	Payload  []byte
 }

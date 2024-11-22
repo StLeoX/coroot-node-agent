@@ -605,9 +605,9 @@ func (c *Container) getActualDestination(p *Process, src, dst netaddr.IPPort) (*
 	return nil, nil
 }
 
-func (c *Container) destBelongsToWorld(dst netaddr.IPPort) bool {
-	// 判断主机是否请求某个外部站点，其特点往往是 ipv6:443。
-	if dst.IP().Is6() && dst.Port() == 443 {
+func (c *Container) addrBelongsToWorld(addr netaddr.IPPort) bool {
+	// 判断主机是否请求某个外部站点。
+	if !addr.IP().IsPrivate() && (addr.Port() == 443 || addr.Port() == 80) {
 		return true
 	}
 	return false

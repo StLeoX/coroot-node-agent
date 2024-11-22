@@ -70,8 +70,8 @@ type Event struct {
 	SrcAddr      netaddr.IPPort
 	DstAddr      netaddr.IPPort
 	Fd           uint64
-	Timestamp    uint64 // timestamp in nanoseconds
-	Duration     time.Duration
+	Timestamp    uint64        // nanoseconds, might be overwrite by `time.Now()`
+	Duration     time.Duration // nanoseconds
 	L7Request    *l7.Request
 	TrafficStats *TrafficStats
 }
@@ -345,7 +345,7 @@ type procEvent struct {
 type tcpEvent struct {
 	Fd            uint64
 	Timestamp     uint64
-	Duration      uint64
+	Duration      uint64 // nanoseconds
 	Type          EventType
 	Pid           uint32
 	BytesSent     uint64
@@ -370,7 +370,7 @@ type l7Event struct {
 	TgidWrite           uint64
 	TgidRead            uint64
 	Status              uint32
-	Duration            uint64
+	Duration            uint64 // nanoseconds
 	Protocol            uint8
 	Method              uint8
 	Padding             uint16
@@ -383,7 +383,7 @@ type l7EventSS struct {
 	Fd          uint64
 	Pid         uint32
 	Timestamp   uint64
-	Duration    uint64
+	Duration    uint64 // nanoseconds
 	StatementId uint32
 	TgidRead    uint64
 	TgidWrite   uint64
@@ -392,7 +392,7 @@ type l7EventSS struct {
 type pythonThreadEvent struct {
 	Type     EventType
 	Pid      uint32
-	Duration uint64
+	Duration uint64 // nanoseconds
 }
 
 func runEventsReader(name string, r *perf.Reader, ch chan<- Event, typ perfMapType) {
@@ -455,8 +455,8 @@ func runEventsReader(name string, r *perf.Reader, ch chan<- Event, typ perfMapTy
 				TgidReqSs:  l7EventSS.TgidRead,
 				TgidRespSs: l7EventSS.TgidWrite,
 				Fd:         l7EventSS.Fd,
-				Timestamp:  l7EventSS.Timestamp,
-				Duration:   time.Duration(l7EventSS.Duration),
+				//Timestamp:  l7EventSS.Timestamp, // shouldn't use this kernel timestamp
+				Duration: time.Duration(l7EventSS.Duration),
 			}
 		case perfMapTypeFileEvents:
 			v := &fileEvent{}

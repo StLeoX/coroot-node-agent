@@ -4,7 +4,9 @@ package tracing
 
 import (
 	"context"
+	"github.com/coroot/coroot-node-agent/common"
 	"k8s.io/klog/v2"
+	"strconv"
 	"sync"
 	"time"
 
@@ -13,7 +15,7 @@ import (
 )
 
 const (
-	SSEBatchLimit   = 50 // l7_event_ss processing batch size
+	SSEBatchLimit   = 100 // l7_event_ss processing batch size
 	SSEBatchTimeout = 5 * time.Second
 )
 
@@ -21,13 +23,14 @@ type SSEventBatcher struct {
 	limit  int
 	client *ch.Client
 
-	lock sync.Mutex
-	done chan struct{}
+	addLock sync.Mutex
+	done    chan struct{}
 
 	Timestamp   *chproto.ColDateTime64
 	Duration    *chproto.ColUInt64
-	TgidRead    *chproto.ColUInt64
-	TgidWrite   *chproto.ColUInt64
+	ContainerID *chproto.ColStr
+	TgidRead    *chproto.ColStr
+	TgidWrite   *chproto.ColStr
 	StatementID *chproto.ColUInt32
 }
 
@@ -40,8 +43,9 @@ func NewSSEventBatcher(limit int, timeout time.Duration, client *ch.Client) *SSE
 
 		Timestamp:   new(chproto.ColDateTime64).WithPrecision(chproto.PrecisionNano),
 		Duration:    new(chproto.ColUInt64),
-		TgidRead:    new(chproto.ColUInt64),
-		TgidWrite:   new(chproto.ColUInt64),
+		ContainerID: new(chproto.ColStr),
+		TgidRead:    new(chproto.ColStr),
+		TgidWrite:   new(chproto.ColStr),
 		StatementID: new(chproto.ColUInt32),
 	}
 
@@ -53,9 +57,9 @@ func NewSSEventBatcher(limit int, timeout time.Duration, client *ch.Client) *SSE
 			case <-b.done:
 				return
 			case <-ticker.C:
-				b.lock.Lock()
+				b.addLock.Lock()
 				b.save()
-				b.lock.Unlock()
+				b.addLock.Unlock()
 			}
 		}
 	}()
@@ -63,11 +67,17 @@ func NewSSEventBatcher(limit int, timeout time.Duration, client *ch.Client) *SSE
 	return b
 }
 
-func (b *SSEventBatcher) Append(timestamp uint64, duration time.Duration, TgidReqSs, TgidRespSs uint64) {
-	b.Timestamp.Append(time.Unix(0, int64(timestamp)))
+func (b *SSEventBatcher) Add(timestamp uint64, duration time.Duration, containerID string, TgidReqSs, TgidRespSs uint64) {
+	b.addLock.Lock()
+	defer b.addLock.Unlock()
+
+	// 事件时间，类似于 tracing/tracing.go:95 处理，直接用 now() 覆盖。
+	//b.Timestamp.Add(time.Unix(0, int64(timestamp))) // nanoseconds
+	b.Timestamp.Append(time.Now())
 	b.Duration.Append(uint64(duration))
-	b.TgidRead.Append(TgidReqSs)
-	b.TgidWrite.Append(TgidRespSs)
+	b.ContainerID.Append(containerID)
+	b.TgidRead.Append(strconv.FormatUint(TgidReqSs, 10))
+	b.TgidWrite.Append(strconv.FormatUint(TgidRespSs, 10))
 	b.StatementID.Append(0) // todo support something like x-request-id
 
 	if b.Timestamp.Rows() < b.limit {
@@ -78,9 +88,9 @@ func (b *SSEventBatcher) Append(timestamp uint64, duration time.Duration, TgidRe
 
 func (b *SSEventBatcher) Close() {
 	b.done <- struct{}{}
-	b.lock.Lock()
+	b.addLock.Lock()
 	b.save()
-	b.lock.Unlock()
+	b.addLock.Unlock()
 }
 
 func (b *SSEventBatcher) save() {
@@ -91,11 +101,23 @@ func (b *SSEventBatcher) save() {
 	input := chproto.Input{
 		{Name: "Timestamp", Data: b.Timestamp},
 		{Name: "Duration", Data: b.Duration},
-		{Name: "StatementId", Data: b.StatementID},
+		{Name: "ContainerId", Data: b.ContainerID},
 		{Name: "TgidRead", Data: b.TgidRead},
 		{Name: "TgidWrite", Data: b.TgidWrite},
+		{Name: "StatementId", Data: b.StatementID},
 	}
 	query := ch.Query{Body: input.Into("l7_events_ss"), Input: input}
+
+	if b.client == nil || b.client.IsClosed() {
+		var err error
+		b.client, err = common.NewChClient()
+		if err != nil {
+			klog.Errorln(err)
+			return
+		}
+	}
+
+	// save and reset
 	err := b.client.Do(context.Background(), query)
 	if err != nil {
 		klog.Errorln(err)

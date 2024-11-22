@@ -2,9 +2,7 @@ package containers
 
 import (
 	"bytes"
-	"context"
 	"fmt"
-	"github.com/ClickHouse/ch-go"
 	"github.com/coroot/coroot-node-agent/tracing"
 	"os"
 	"regexp"
@@ -108,14 +106,8 @@ func NewRegistry(reg prometheus.Registerer, kernelVersion string, processInfoCh 
 		return nil, err
 	}
 
-	opts := ch.Options{
-		Address:     flags.GetString(flags.ClickhouseEndpoint),
-		User:        flags.GetString(flags.ClickhouseUser),
-		Password:    flags.GetString(flags.ClickhousePassword),
-		Compression: ch.CompressionLZ4,
-		DialTimeout: 10 * time.Second,
-	}
-	chClient, err := ch.Dial(context.Background(), opts)
+	// New chClient
+	chClient, err := common.NewChClient()
 	if err != nil {
 		return nil, err
 	}
@@ -168,6 +160,7 @@ func (r *Registry) Collect(ch chan<- prometheus.Metric) {
 func (r *Registry) Close() {
 	r.tracer.Close()
 	close(r.events)
+	r.sseBatcher.Close()
 }
 
 func (r *Registry) handleEvents(ch <-chan ebpftracer.Event) {
@@ -270,7 +263,7 @@ func (r *Registry) handleEvents(ch <-chan ebpftracer.Event) {
 				if c := r.getOrCreateContainer(e.Pid); c != nil {
 					c.onListenOpen(e.Pid, e.SrcAddr, false)
 				} else {
-					if !c.destBelongsToWorld(e.DstAddr) {
+					if !c.addrBelongsToWorld(e.DstAddr) {
 						klog.Infoln("TCP listen open from unknown container", e)
 					}
 				}
@@ -284,7 +277,7 @@ func (r *Registry) handleEvents(ch <-chan ebpftracer.Event) {
 					c.onConnectionOpen(e.Pid, e.Fd, e.SrcAddr, e.DstAddr, e.Timestamp, false, e.Duration)
 					c.attachTlsUprobes(r.tracer, e.Pid)
 				} else {
-					if !c.destBelongsToWorld(e.DstAddr) {
+					if !c.addrBelongsToWorld(e.DstAddr) {
 						klog.Infoln("TCP connection from unknown container", e)
 					}
 				}
@@ -292,7 +285,7 @@ func (r *Registry) handleEvents(ch <-chan ebpftracer.Event) {
 				if c := r.getOrCreateContainer(e.Pid); c != nil {
 					c.onConnectionOpen(e.Pid, e.Fd, e.SrcAddr, e.DstAddr, 0, true, e.Duration)
 				} else {
-					if !c.destBelongsToWorld(e.DstAddr) {
+					if !c.addrBelongsToWorld(e.DstAddr) {
 						klog.Infoln("TCP connection error from unknown container", e)
 					}
 				}
@@ -323,7 +316,8 @@ func (r *Registry) handleEvents(ch <-chan ebpftracer.Event) {
 				}
 			case ebpftracer.EventTypeL7Response:
 				if c := r.containersByPid[e.Pid]; c != nil {
-					r.sseBatcher.Append(e.Timestamp, e.Duration, e.TgidReqSs, e.TgidRespSs)
+					// 无法用 IPPort 标识事件，因为 connectionsByPidFd 中的 PidFd 是 client-side 的，而 e.Pid 是 server-side 的。
+					r.sseBatcher.Add(e.Timestamp, e.Duration, string(c.id), e.TgidReqSs, e.TgidRespSs)
 				}
 			case ebpftracer.EventTypePythonThreadLock:
 				if c := r.containersByPid[e.Pid]; c != nil {

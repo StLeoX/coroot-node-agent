@@ -66,7 +66,7 @@ struct l7_event {
     __u64 tgid_write;  // tgid who sends the request
     __u64 tgid_read;  // tgid who receives the response
     __u32 status;
-    __u64 duration;
+    __u64 duration;  // nanoseconds, from `bpf_ktime_get_ns`
     __u8 protocol;
     __u8 method;
     __u16 padding;
