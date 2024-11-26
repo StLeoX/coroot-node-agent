@@ -693,7 +693,7 @@ func (c *Container) onDNSRequest(r *l7.Request) map[netaddr.IP]string {
 	return ip2fqdn
 }
 
-func (c *Container) onL7Request(pid uint32, fd uint64, connectionTimestamp uint64, r *l7.Request, rawEvent *ebpftracer.Event) map[netaddr.IP]string {
+func (c *Container) onL7Request(pid uint32, fd uint64, connectionTimestamp uint64, r *l7.Request, raw *ebpftracer.Event) map[netaddr.IP]string {
 	c.lock.Lock()
 	defer c.lock.Unlock()
 
@@ -709,7 +709,7 @@ func (c *Container) onL7Request(pid uint32, fd uint64, connectionTimestamp uint6
 		return nil
 	}
 	stats := c.l7Stats.get(r.Protocol, conn.Dest, conn.ActualDest)
-	trace := tracing.NewSpanBuilder(string(c.id), conn.Src, conn.ActualDest, rawEvent)
+	trace := tracing.NewSpanBuilder(string(c.id), conn.Src, conn.ActualDest, raw)
 
 	switch r.Protocol {
 	// sort `case` by protocol's statistics distribution

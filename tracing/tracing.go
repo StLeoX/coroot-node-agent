@@ -77,16 +77,17 @@ type SpanBuilder struct {
 	commonAttrs []attribute.KeyValue
 }
 
-func NewSpanBuilder(containerId string, source, destination netaddr.IPPort, rawEvent *ebpftracer.Event) *SpanBuilder {
+func NewSpanBuilder(containerId string, source, destination netaddr.IPPort, raw *ebpftracer.Event) *SpanBuilder {
 	if tracer == nil {
 		return nil
 	}
 	return &SpanBuilder{containerId: containerId, destination: destination, commonAttrs: []attribute.KeyValue{
-		semconv.NetSockHostAddr(source.String()),
+		semconv.NetHostName(source.IP().String()),
+		semconv.NetHostPort(int(source.Port())),
 		semconv.NetPeerName(destination.IP().String()),
-		semconv.NetSockPeerAddr(destination.String()), // 不用 NetPeerPort，因为它会被 NetSockPeerAddr 包含。
-		attribute.String("tgid_req_cs", strconv.FormatUint(rawEvent.TgidReqCs, 10)),
-		attribute.String("tgid_resp_cs", strconv.FormatUint(rawEvent.TgidRespCs, 10)),
+		semconv.NetPeerPort(int(destination.Port())),
+		attribute.String("tgid_req_cs", strconv.FormatUint(raw.TgidReqCs, 10)),
+		attribute.String("tgid_resp_cs", strconv.FormatUint(raw.TgidRespCs, 10)),
 	}}
 }
 
