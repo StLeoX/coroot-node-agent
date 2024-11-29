@@ -67,18 +67,16 @@ func NewSSEventBatcher(limit int, timeout time.Duration, client *ch.Client) *SSE
 	return b
 }
 
-func (b *SSEventBatcher) Add(timestamp uint64, duration time.Duration, containerID string, TgidReqSs, TgidRespSs uint64) {
+func (b *SSEventBatcher) Add(startTime time.Time, duration time.Duration, containerID string, TgidReqSs, TgidRespSs uint64) {
 	b.addLock.Lock()
 	defer b.addLock.Unlock()
 
-	// 事件时间，类似于 tracing/tracing.go:95 处理，直接用 now() 覆盖。
-	//b.Timestamp.Add(time.Unix(0, int64(timestamp))) // nanoseconds
-	b.Timestamp.Append(time.Now())
+	b.Timestamp.Append(startTime)
 	b.Duration.Append(uint64(duration))
-	b.ContainerID.Append(containerID)
 	b.TgidRead.Append(strconv.FormatUint(TgidReqSs, 10))
 	b.TgidWrite.Append(strconv.FormatUint(TgidRespSs, 10))
-	b.StatementID.Append(0) // todo support something like x-request-id
+	b.ContainerID.Append(containerID) // fixme Pid 以及 ContainerId 似乎来自 span client-side。
+	b.StatementID.Append(0)           // todo 支持 x-request-id 之类的 RequestId。
 
 	if b.Timestamp.Rows() < b.limit {
 		return

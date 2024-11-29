@@ -578,7 +578,7 @@ int trace_exit_read(void *ctx, __u64 id, __u32 pid, __u16 is_tls, long int ret) 
 struct l7_event_ss {
     __u64 fd;  // server socket fd
     __u32 pid;  // server pid
-    __u64 timestamp;  // (kernel) timestamp when reads request from client, actually unused from the GoLang part
+    __u64 timestamp;  // (kernel) timestamp when reading request
     __u64 duration;  // duration to nanoseconds when writing response to client, used from the GoLang part
     __u32 statement_id;  // some protocols may support request_id, like MySQL
     __u64 tgid_read;  // tgid who receives the request

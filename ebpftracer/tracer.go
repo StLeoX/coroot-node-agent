@@ -60,20 +60,21 @@ type TrafficStats struct {
 
 // Event 类似 Flow，是建立 Span 的原始数据。
 type Event struct {
-	Type         EventType
-	Reason       EventReason
-	Pid          uint32
-	TgidReqCs    uint64 // tgid of request from client-side
-	TgidReqSs    uint64 // tgid of request from server-side
-	TgidRespSs   uint64 // tgid of response from client-side
-	TgidRespCs   uint64 // tgid of response from server-side
-	SrcAddr      netaddr.IPPort
-	DstAddr      netaddr.IPPort
-	Fd           uint64
-	Timestamp    uint64        // nanoseconds, might be overwrite by `time.Now()`
-	Duration     time.Duration // nanoseconds
-	L7Request    *l7.Request
-	TrafficStats *TrafficStats
+	Type            EventType
+	Reason          EventReason
+	Pid             uint32
+	TgidReqCs       uint64 // tgid of request from client-side
+	TgidReqSs       uint64 // tgid of request from server-side
+	TgidRespSs      uint64 // tgid of response from client-side
+	TgidRespCs      uint64 // tgid of response from server-side
+	SrcAddr         netaddr.IPPort
+	DstAddr         netaddr.IPPort
+	Fd              uint64
+	Timestamp       uint64        // nanoseconds, it may be overwrite by `time.Now()`
+	KernelTimestamp uint64        // nanoseconds, it usually comes from `bpf_ktime_get_ns` directly
+	Duration        time.Duration // nanoseconds
+	L7Request       *l7.Request
+	TrafficStats    *TrafficStats
 }
 
 type perfMapType uint8
@@ -479,13 +480,14 @@ func runEventsReader(name string, r *perf.Reader, ch chan<- Event, typ perfMapTy
 				continue
 			}
 			event = Event{
-				Type:      v.Type,
-				Pid:       v.Pid,
-				SrcAddr:   ipPort(v.SAddr, v.SPort),
-				DstAddr:   ipPort(v.DAddr, v.DPort),
-				Fd:        v.Fd,
-				Timestamp: v.Timestamp,
-				Duration:  time.Duration(v.Duration),
+				Type:            v.Type,
+				Pid:             v.Pid,
+				SrcAddr:         ipPort(v.SAddr, v.SPort),
+				DstAddr:         ipPort(v.DAddr, v.DPort),
+				Fd:              v.Fd,
+				Timestamp:       v.Timestamp,
+				KernelTimestamp: v.Timestamp,
+				Duration:        time.Duration(v.Duration),
 			}
 			if v.Type == EventTypeConnectionClose {
 				event.TrafficStats = &TrafficStats{

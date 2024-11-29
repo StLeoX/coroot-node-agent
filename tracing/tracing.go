@@ -70,34 +70,39 @@ func Init(machineId, hostname, version string) {
 	}
 }
 
-// SpanBuilder keeps common attributes for spans
+// SpanBuilder manages resource attributes. Others manage span attributes.
 type SpanBuilder struct {
 	containerId string
 	destination netaddr.IPPort
+	startTime   time.Time
 	commonAttrs []attribute.KeyValue
 }
 
-func NewSpanBuilder(containerId string, source, destination netaddr.IPPort, raw *ebpftracer.Event) *SpanBuilder {
+func NewSpanBuilder(containerId string, source, destination netaddr.IPPort, startTime time.Time, raw *ebpftracer.Event) *SpanBuilder {
 	if tracer == nil {
 		return nil
 	}
-	return &SpanBuilder{containerId: containerId, destination: destination, commonAttrs: []attribute.KeyValue{
-		semconv.NetHostName(source.IP().String()),
-		semconv.NetHostPort(int(source.Port())),
-		semconv.NetPeerName(destination.IP().String()),
-		semconv.NetPeerPort(int(destination.Port())),
-		attribute.String("tgid_req_cs", strconv.FormatUint(raw.TgidReqCs, 10)),
-		attribute.String("tgid_resp_cs", strconv.FormatUint(raw.TgidRespCs, 10)),
-	}}
+
+	return &SpanBuilder{containerId: containerId,
+		destination: destination,
+		startTime:   startTime,
+		commonAttrs: []attribute.KeyValue{
+			semconv.NetHostName(source.IP().String()),
+			semconv.NetHostPort(int(source.Port())),
+			semconv.NetPeerName(destination.IP().String()),
+			semconv.NetPeerPort(int(destination.Port())),
+			attribute.String("tgid_req_cs", strconv.FormatUint(raw.TgidReqCs, 10)),
+			attribute.String("tgid_resp_cs", strconv.FormatUint(raw.TgidRespCs, 10)),
+		}}
 }
 
-func (t *SpanBuilder) createSpan(name string, duration time.Duration, error bool, attrs ...attribute.KeyValue) {
+func (b *SpanBuilder) createSpan(name string, duration time.Duration, error bool, attrs ...attribute.KeyValue) {
 	// todo 不管之前如何滥用时间字段，这里完全在使用 process time，这一点可以使用 event time，因为中间会存在 agent 处理耗时。
 	end := time.Now()
 	start := end.Add(-duration)
-	_, span := tracer(t.containerId).Start(context.Background(), name, trace.WithTimestamp(start), trace.WithSpanKind(trace.SpanKindClient))
+	_, span := tracer(b.containerId).Start(context.Background(), name, trace.WithTimestamp(start), trace.WithSpanKind(trace.SpanKindClient))
 	span.SetAttributes(attrs...)
-	span.SetAttributes(t.commonAttrs...)
+	span.SetAttributes(b.commonAttrs...)
 	if error {
 		span.SetStatus(codes.Error, "")
 	} else {
@@ -106,21 +111,21 @@ func (t *SpanBuilder) createSpan(name string, duration time.Duration, error bool
 	span.End(trace.WithTimestamp(end))
 }
 
-func (t *SpanBuilder) HttpRequest(method, path string, status l7.Status, duration time.Duration) {
-	if t == nil || method == "" {
+func (b *SpanBuilder) HttpRequest(method, path string, status l7.Status, duration time.Duration) {
+	if b == nil || method == "" {
 		return
 	}
-	t.createSpan(fmt.Sprintf("%s %s", method, path),
+	b.createSpan(fmt.Sprintf("%s %s", method, path),
 		duration,
 		status >= 400,
-		semconv.HTTPURL(fmt.Sprintf("http://%s%s", t.destination.String(), path)),
+		semconv.HTTPURL(fmt.Sprintf("http://%s%s", b.destination.String(), path)),
 		semconv.HTTPMethod(method),
 		semconv.HTTPStatusCode(int(status)),
 	)
 }
 
-func (t *SpanBuilder) Http2Request(method, path, scheme string, status l7.Status, duration time.Duration) {
-	if t == nil {
+func (b *SpanBuilder) Http2Request(method, path, scheme string, status l7.Status, duration time.Duration) {
+	if b == nil {
 		return
 	}
 	if method == "" {
@@ -132,50 +137,50 @@ func (t *SpanBuilder) Http2Request(method, path, scheme string, status l7.Status
 	if scheme == "" {
 		scheme = "unknown"
 	}
-	t.createSpan(fmt.Sprintf("%s %s", method, path),
+	b.createSpan(fmt.Sprintf("%s %s", method, path),
 		duration,
 		status > 400,
-		semconv.HTTPURL(fmt.Sprintf("%s://%s%s", scheme, t.destination.String(), path)),
+		semconv.HTTPURL(fmt.Sprintf("%s://%s%s", scheme, b.destination.String(), path)),
 		semconv.HTTPMethod(method),
 		semconv.HTTPStatusCode(int(status)),
 	)
 }
 
-func (t *SpanBuilder) PostgresQuery(query string, error bool, duration time.Duration) {
-	if t == nil || query == "" {
+func (b *SpanBuilder) PostgresQuery(query string, error bool, duration time.Duration) {
+	if b == nil || query == "" {
 		return
 	}
-	t.createSpan("query", duration, error,
+	b.createSpan("query", duration, error,
 		semconv.DBSystemPostgreSQL,
 		// todo 轻解析 SQL 知道 CRUD 操作类型。
 		semconv.DBStatement(query),
 	)
 }
 
-func (t *SpanBuilder) MysqlQuery(query string, error bool, duration time.Duration) {
-	if t == nil || query == "" {
+func (b *SpanBuilder) MysqlQuery(query string, error bool, duration time.Duration) {
+	if b == nil || query == "" {
 		return
 	}
-	t.createSpan("query", duration, error,
+	b.createSpan("query", duration, error,
 		semconv.DBSystemMySQL,
 		// todo 轻解析 SQL 知道 CRUD 操作类型。
 		semconv.DBStatement(query),
 	)
 }
 
-func (t *SpanBuilder) MongoQuery(query string, error bool, duration time.Duration) {
-	if t == nil || query == "" {
+func (b *SpanBuilder) MongoQuery(query string, error bool, duration time.Duration) {
+	if b == nil || query == "" {
 		return
 	}
-	t.createSpan("query", duration, error,
+	b.createSpan("query", duration, error,
 		semconv.DBSystemMongoDB,
 		// todo 轻解析 SQL 知道 CRUD 操作类型。
 		semconv.DBStatement(query),
 	)
 }
 
-func (t *SpanBuilder) MemcachedQuery(cmd string, items []string, error bool, duration time.Duration) {
-	if t == nil || cmd == "" {
+func (b *SpanBuilder) MemcachedQuery(cmd string, items []string, error bool, duration time.Duration) {
+	if b == nil || cmd == "" {
 		return
 	}
 	attrs := []attribute.KeyValue{
@@ -188,18 +193,18 @@ func (t *SpanBuilder) MemcachedQuery(cmd string, items []string, error bool, dur
 	} else if len(items) > 1 {
 		attrs = append(attrs, MemcacheDBItemKeyName.StringSlice(items))
 	}
-	t.createSpan(cmd, duration, error, attrs...)
+	b.createSpan(cmd, duration, error, attrs...)
 }
 
-func (t *SpanBuilder) RedisQuery(cmd, args string, error bool, duration time.Duration) {
-	if t == nil || cmd == "" {
+func (b *SpanBuilder) RedisQuery(cmd, args string, error bool, duration time.Duration) {
+	if b == nil || cmd == "" {
 		return
 	}
 	statement := cmd
 	if args != "" {
 		statement += " " + args
 	}
-	t.createSpan(cmd, duration, error,
+	b.createSpan(cmd, duration, error,
 		semconv.DBSystemRedis,
 		semconv.DBOperation(cmd),
 		semconv.DBStatement(statement),

@@ -274,6 +274,7 @@ func (r *Registry) handleEvents(ch <-chan ebpftracer.Event) {
 
 			case ebpftracer.EventTypeConnectionOpen:
 				if c := r.getOrCreateContainer(e.Pid); c != nil {
+					// 针对 ConnectionOpen 事件，e.Timestamp 目前保留的是建立连接的时间。
 					c.onConnectionOpen(e.Pid, e.Fd, e.SrcAddr, e.DstAddr, e.Timestamp, false, e.Duration)
 					c.attachTlsUprobes(r.tracer, e.Pid)
 				} else {
@@ -305,9 +306,9 @@ func (r *Registry) handleEvents(ch <-chan ebpftracer.Event) {
 					continue
 				}
 				if c := r.containersByPid[e.Pid]; c != nil {
-					// 针对 L7Request 事件，e.Timestamp 目前保留的是建立连接的时间。
-					// 在 onDNSRequest 上更新 r.ip2fqdn 缓存。
+					// 针对 L7Request 事件，e.Timestamp 是建立连接的时间，e.KernelTimestamp 是boot以来的时间。
 					ip2fqdn := c.onL7Request(e.Pid, e.Fd, e.Timestamp, e.L7Request, &e)
+					// 针对 onDNSRequest ，会更新 r.ip2fqdn 缓存。
 					r.ip2fqdnLock.Lock()
 					for ip, fqdn := range ip2fqdn {
 						r.ip2fqdn[ip] = fqdn
@@ -316,8 +317,10 @@ func (r *Registry) handleEvents(ch <-chan ebpftracer.Event) {
 				}
 			case ebpftracer.EventTypeL7Response:
 				if c := r.containersByPid[e.Pid]; c != nil {
-					// 无法用 IPPort 标识事件，因为 connectionsByPidFd 中的 PidFd 是 client-side 的，而 e.Pid 是 server-side 的。
-					r.sseBatcher.Add(e.Timestamp, e.Duration, string(c.id), e.TgidReqSs, e.TgidRespSs)
+					// 针对 L7Response 事件，e.Timestamp 是建立连接的时间，e.KernelTimestamp 是boot以来的时间。
+					sseStartTime := getRealTime(e.KernelTimestamp)
+					// c.id 基本无用。无法用 IPPort 标识事件，因为 connectionsByPidFd 中的 PidFd 是 client-side 的，而 e.Pid 是 server-side 的。
+					r.sseBatcher.Add(sseStartTime, e.Duration, string(c.id), e.TgidReqSs, e.TgidRespSs)
 				}
 			case ebpftracer.EventTypePythonThreadLock:
 				if c := r.containersByPid[e.Pid]; c != nil {
