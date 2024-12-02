@@ -27,7 +27,7 @@ type SSEventBatcher struct {
 	done    chan struct{}
 
 	Timestamp   *chproto.ColDateTime64
-	Duration    *chproto.ColUInt64
+	Duration    *chproto.ColInt64
 	ContainerID *chproto.ColStr
 	TgidRead    *chproto.ColStr
 	TgidWrite   *chproto.ColStr
@@ -42,7 +42,7 @@ func NewSSEventBatcher(limit int, timeout time.Duration, client *ch.Client) *SSE
 		done: make(chan struct{}),
 
 		Timestamp:   new(chproto.ColDateTime64).WithPrecision(chproto.PrecisionNano),
-		Duration:    new(chproto.ColUInt64),
+		Duration:    new(chproto.ColInt64),
 		ContainerID: new(chproto.ColStr),
 		TgidRead:    new(chproto.ColStr),
 		TgidWrite:   new(chproto.ColStr),
@@ -72,7 +72,7 @@ func (b *SSEventBatcher) Add(startTime time.Time, duration time.Duration, contai
 	defer b.addLock.Unlock()
 
 	b.Timestamp.Append(startTime)
-	b.Duration.Append(uint64(duration))
+	b.Duration.Append(duration.Nanoseconds())
 	b.TgidRead.Append(strconv.FormatUint(TgidReqSs, 10))
 	b.TgidWrite.Append(strconv.FormatUint(TgidRespSs, 10))
 	b.ContainerID.Append(containerID) // fixme Pid 以及 ContainerId 似乎来自 span client-side。
