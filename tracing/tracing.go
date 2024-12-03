@@ -111,14 +111,14 @@ func (b *SpanBuilder) createSpan(name string, duration time.Duration, error bool
 	span.End(trace.WithTimestamp(end))
 }
 
-func (b *SpanBuilder) HttpRequest(method, path string, status l7.Status, duration time.Duration) {
+func (b *SpanBuilder) HttpRequest(method, uri, path string, status l7.Status, duration time.Duration) {
 	if b == nil || method == "" {
 		return
 	}
 	b.createSpan(fmt.Sprintf("%s %s", method, path),
 		duration,
 		status >= 400,
-		semconv.HTTPURL(fmt.Sprintf("http://%s%s", b.destination.String(), path)),
+		semconv.HTTPURL(fmt.Sprintf("http://%s%s", b.destination.String(), uri)),
 		semconv.HTTPMethod(method),
 		semconv.HTTPStatusCode(int(status)),
 	)
