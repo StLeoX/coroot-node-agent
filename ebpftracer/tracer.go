@@ -451,13 +451,13 @@ func runEventsReader(name string, r *perf.Reader, ch chan<- Event, typ perfMapTy
 				continue
 			}
 			event = Event{
-				Type:       EventTypeL7Response,
-				Pid:        l7EventSS.Pid,
-				TgidReqSs:  l7EventSS.TgidRead,
-				TgidRespSs: l7EventSS.TgidWrite,
-				Fd:         l7EventSS.Fd,
-				//Timestamp:  l7EventSS.Timestamp, // shouldn't use this kernel timestamp
-				Duration: time.Duration(l7EventSS.Duration),
+				Type:            EventTypeL7Response,
+				Pid:             l7EventSS.Pid,
+				TgidReqSs:       l7EventSS.TgidRead,
+				TgidRespSs:      l7EventSS.TgidWrite,
+				Fd:              l7EventSS.Fd,
+				KernelTimestamp: l7EventSS.Timestamp,
+				Duration:        time.Duration(l7EventSS.Duration),
 			}
 		case perfMapTypeFileEvents:
 			v := &fileEvent{}
