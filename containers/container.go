@@ -614,6 +614,11 @@ func getRealTime(kernelTimestamp uint64) time.Time {
 	return eventRealTime
 }
 
+// getNearTime based on clock time
+func getNearTime() time.Time {
+	return time.Now() // 这还不是 UTC 时间？
+}
+
 func (c *Container) addrBelongsToWorld(addr netaddr.IPPort) bool {
 	// 判断主机是否请求某个外部站点。
 	if !addr.IP().IsPrivate() && (addr.Port() == 443 || addr.Port() == 80) {
@@ -720,7 +725,8 @@ func (c *Container) onL7Request(pid uint32, fd, connectionTimestamp uint64, r *l
 
 	stats := c.l7Stats.get(r.Protocol, conn.Dest, conn.ActualDest)
 
-	spanStartTime := getRealTime(raw.KernelTimestamp)
+	//spanStartTime := getRealTime(raw.KernelTimestamp)
+	spanStartTime := getNearTime()
 	spanBuilder := tracing.NewSpanBuilder(string(c.id), conn.Src, conn.ActualDest, spanStartTime, raw)
 
 	switch r.Protocol {

@@ -318,7 +318,8 @@ func (r *Registry) handleEvents(ch <-chan ebpftracer.Event) {
 			case ebpftracer.EventTypeL7Response:
 				if c := r.containersByPid[e.Pid]; c != nil {
 					// 针对 L7Response 事件，e.Timestamp 是建立连接的时间，e.KernelTimestamp 是boot以来的时间。
-					sseStartTime := getRealTime(e.KernelTimestamp)
+					//sseStartTime := getRealTime(e.KernelTimestamp)
+					sseStartTime := getNearTime()
 					// c.id 基本无用。无法用 IPPort 标识事件，因为 connectionsByPidFd 中的 PidFd 是 client-side 的，而 e.Pid 是 server-side 的。
 					r.sseBatcher.Add(sseStartTime, e.Duration, string(c.id), e.TgidReqSs, e.TgidRespSs)
 				}
