@@ -3,7 +3,6 @@ package containers
 import (
 	"bytes"
 	"fmt"
-	"github.com/coroot/coroot-node-agent/tracing"
 	"os"
 	"regexp"
 	"strconv"
@@ -45,13 +44,11 @@ type Registry struct {
 	tracer *ebpftracer.Tracer
 	events chan ebpftracer.Event
 
-	hostConntrack *Conntrack // 复用 conntrack 连接查找表。
-
-	containersById       map[ContainerID]*Container // 内部编号 ContainerID。
+	containersById       map[ContainerID]*Container // 内部编号 ContainerID
 	containersByCgroupId map[string]*Container      // 通过 host 上的 cgroupID 查找相应的容器
-	containersByPid      map[uint32]*Container      // 通过 host 上的进程查找相应的容器，比如 k8s pod。
-	ip2fqdn              map[netaddr.IP]string      // coroot 维护的 DNS 局部缓存。
-	ip2fqdnLock          sync.Mutex
+	containersByPid      map[uint32]*Container      // 通过 host 上的进程查找相应的容器，比如 k8s pod
+	ip2fqdn              map[netaddr.IP]string      // 维护 DNS 局部缓存
+	ip2fqdnLock          sync.RWMutex
 
 	processInfoCh chan<- ProcessInfo
 
@@ -62,8 +59,7 @@ type Registry struct {
 	sseBatcher *tracing.SSEventBatcher
 }
 
-// NewRegistry 综合了各个功能模块
-func NewRegistry(reg prometheus.Registerer, kernelVersion string, processInfoCh chan<- ProcessInfo) (*Registry, error) {
+func NewRegistry(reg prometheus.Registerer, processInfoCh chan<- ProcessInfo) (*Registry, error) {
 	ns, err := proc.GetSelfNetNs()
 	if err != nil {
 		return nil, err
@@ -94,16 +90,11 @@ func NewRegistry(reg prometheus.Registerer, kernelVersion string, processInfoCh 
 	if err := ContainerdInit(); err != nil {
 		klog.Warningln(err)
 	}
-	// 疑点：一般而言 crio 和 containerd 是二选一的关系，所以这个 warning 并不成立。
 	if err := CrioInit(); err != nil {
 		klog.Warningln(err)
 	}
 	if err := JournaldInit(); err != nil {
 		klog.Warningln(err)
-	}
-	ct, err := NewConntrack(hostNetNs)
-	if err != nil {
-		return nil, err
 	}
 
 	// New chClient
@@ -113,11 +104,8 @@ func NewRegistry(reg prometheus.Registerer, kernelVersion string, processInfoCh 
 	}
 
 	r := &Registry{
-		reg:    reg,
-		events: make(chan ebpftracer.Event, 10000), // 创建 eBPF 消息队列。达到 size 后的行为是阻塞而不是溢出。
-
-		hostConntrack: ct,
-
+		reg:                  reg,
+		events:               make(chan ebpftracer.Event, 10000), // 参数化 eBPF 消息队列长度。chan 满后是阻塞而不是溢出。
 		containersById:       map[ContainerID]*Container{},
 		containersByCgroupId: map[string]*Container{},
 		containersByPid:      map[uint32]*Container{},
@@ -125,7 +113,7 @@ func NewRegistry(reg prometheus.Registerer, kernelVersion string, processInfoCh 
 
 		processInfoCh: processInfoCh,
 
-		tracer: ebpftracer.NewTracer(kernelVersion, *flags.DisableL7Tracing),
+		tracer: ebpftracer.NewTracer(hostNetNs, selfNetNs, *flags.DisableL7Tracing),
 
 		trafficStatsUpdateCh: make(chan *TrafficStatsUpdate),
 
@@ -135,8 +123,9 @@ func NewRegistry(reg prometheus.Registerer, kernelVersion string, processInfoCh 
 		return nil, err
 	}
 
-	// 分别启动 eBPF 事件的消费者与生产者。
+	// 启动 eBPF 事件消费者。
 	go r.handleEvents(r.events)
+	// 启动 eBPF 事件生产者。
 	if err = r.tracer.Run(r.events); err != nil {
 		close(r.events)
 		return nil, err
@@ -150,8 +139,8 @@ func (r *Registry) Describe(ch chan<- *prometheus.Desc) {
 }
 
 func (r *Registry) Collect(ch chan<- prometheus.Metric) {
-	r.ip2fqdnLock.Lock()
-	defer r.ip2fqdnLock.Unlock()
+	r.ip2fqdnLock.RLock()
+	defer r.ip2fqdnLock.RUnlock()
 	for ip, fqdn := range r.ip2fqdn {
 		ch <- gauge(metrics.Ip2Fqdn, 1, ip.String(), fqdn)
 	}
@@ -168,7 +157,7 @@ func (r *Registry) handleEvents(ch <-chan ebpftracer.Event) {
 	defer gcTicker.Stop()
 	for {
 		select {
-		// 处理 agent 定时 GC 事件，清理不活跃的连接信息。
+		// 处理 agent 定时 GC 事件。
 		case now := <-gcTicker.C:
 			for pid, c := range r.containersByPid {
 				cg, err := proc.ReadCgroup(pid)
@@ -186,7 +175,7 @@ func (r *Registry) handleEvents(ch <-chan ebpftracer.Event) {
 			}
 			activeIPs := map[netaddr.IP]struct{}{}
 			for id, c := range r.containersById {
-				for dst := range c.connectLastAttempt {
+				for dst := range c.lastConnectionAttempts {
 					activeIPs[dst.IP()] = struct{}{}
 				}
 				if !c.Dead(now) {
@@ -224,7 +213,7 @@ func (r *Registry) handleEvents(ch <-chan ebpftracer.Event) {
 			if c := r.containersByPid[u.Pid]; c != nil {
 				c.updateTrafficStats(u)
 			}
-		// 处理 eBPF 采集的事件。
+		// 处理 eBPF 事件。
 		case e, more := <-ch:
 			if !more {
 				return
@@ -256,7 +245,7 @@ func (r *Registry) handleEvents(ch <-chan ebpftracer.Event) {
 
 			case ebpftracer.EventTypeFileOpen:
 				if c := r.getOrCreateContainer(e.Pid); c != nil {
-					c.onFileOpen(e.Pid, e.Fd)
+					c.onFileOpen(e.Pid, e.Fd, e.Mnt, e.Log)
 				}
 
 			case ebpftracer.EventTypeListenOpen:
@@ -275,7 +264,7 @@ func (r *Registry) handleEvents(ch <-chan ebpftracer.Event) {
 			case ebpftracer.EventTypeConnectionOpen:
 				if c := r.getOrCreateContainer(e.Pid); c != nil {
 					// 针对 ConnectionOpen 事件，e.Timestamp 目前保留的是建立连接的时间。
-					c.onConnectionOpen(e.Pid, e.Fd, e.SrcAddr, e.DstAddr, e.Timestamp, false, e.Duration)
+					c.onConnectionOpen(e.Pid, e.Fd, e.SrcAddr, e.DstAddr, e.ActualDstAddr, e.Timestamp, false, e.Duration)
 					c.attachTlsUprobes(r.tracer, e.Pid)
 				} else {
 					if !c.addrBelongsToWorld(e.DstAddr) {
@@ -284,7 +273,7 @@ func (r *Registry) handleEvents(ch <-chan ebpftracer.Event) {
 				}
 			case ebpftracer.EventTypeConnectionError:
 				if c := r.getOrCreateContainer(e.Pid); c != nil {
-					c.onConnectionOpen(e.Pid, e.Fd, e.SrcAddr, e.DstAddr, 0, true, e.Duration)
+					c.onConnectionOpen(e.Pid, e.Fd, e.SrcAddr, e.DstAddr, e.ActualDstAddr, 0, true, e.Duration)
 				} else {
 					if !c.addrBelongsToWorld(e.DstAddr) {
 						klog.Infoln("TCP connection error from unknown container", e)
@@ -295,9 +284,8 @@ func (r *Registry) handleEvents(ch <-chan ebpftracer.Event) {
 					c.onConnectionClose(e)
 				}
 			case ebpftracer.EventTypeTCPRetransmit:
-				srcDst := AddrPair{src: e.SrcAddr, dst: e.DstAddr}
 				for _, c := range r.containersById {
-					if c.onRetransmission(srcDst) {
+					if c.onRetransmission(e.SrcAddr, e.DstAddr) {
 						break
 					}
 				}
@@ -331,7 +319,6 @@ func (r *Registry) handleEvents(ch <-chan ebpftracer.Event) {
 	}
 }
 
-// 同样的问题，同样是 pull-based 查找，可以优化为异步维护 containersByPid 表。
 func (r *Registry) getOrCreateContainer(pid uint32) *Container {
 	if c, seen := r.containersByPid[pid]; c != nil {
 		return c
@@ -365,7 +352,7 @@ func (r *Registry) getOrCreateContainer(pid uint32) *Container {
 		klog.Warningf("failed to get container metadata for pid %d -> %s: %s", pid, cg.Id, err)
 		return nil
 	}
-	id := calculateContainerId(cg, md)
+	id := calcId(cg, md)
 	klog.Infof("calculated container id %d -> %s -> %s", pid, cg.Id, id)
 	if id == "" {
 		if cg.Id == "/init.scope" && pid != 1 {
@@ -382,16 +369,12 @@ func (r *Registry) getOrCreateContainer(pid uint32) *Container {
 			c.cgroup = cg
 			c.metadata = md
 			c.runLogParser("")
-			if c.nsConntrack != nil {
-				_ = c.nsConntrack.Close()
-				c.nsConntrack = nil
-			}
 		}
 		r.containersByPid[pid] = c
 		r.containersByCgroupId[cg.Id] = c
 		return c
 	}
-	c, err := NewContainer(id, cg, md, r.hostConntrack, pid, r)
+	c, err := NewContainer(id, cg, md, pid, r)
 	if err != nil {
 		klog.Warningf("failed to create container pid=%d cg=%s id=%s: %s", pid, cg.Id, id, err)
 		return nil
@@ -433,14 +416,21 @@ func (r *Registry) updateTrafficStatsIfNecessary() {
 	r.trafficStatsLastUpdated = time.Now()
 }
 
-func calculateContainerId(cg *cgroup.Cgroup, md *ContainerMetadata) ContainerID {
-	if cg.ContainerType == cgroup.ContainerTypeSystemdService {
+func (r *Registry) getFQDN(ip netaddr.IP) string {
+	r.ip2fqdnLock.RLock()
+	defer r.ip2fqdnLock.RUnlock()
+	return r.ip2fqdn[ip]
+}
+
+func calcId(cg *cgroup.Cgroup, md *ContainerMetadata) ContainerID {
+	switch cg.ContainerType {
+	case cgroup.ContainerTypeSystemdService:
 		if strings.HasPrefix(cg.ContainerId, "/system.slice/crio-conmon-") {
 			return ""
 		}
 		return ContainerID(cg.ContainerId)
-	}
-	switch cg.ContainerType {
+	case cgroup.ContainerTypeTalosRuntime:
+		return ContainerID(cg.ContainerId)
 	case cgroup.ContainerTypeDocker, cgroup.ContainerTypeContainerd, cgroup.ContainerTypeSandbox, cgroup.ContainerTypeCrio:
 	default:
 		return ""

@@ -2,10 +2,14 @@ package ebpftracer
 
 import (
 	"bytes"
+	"compress/gzip"
+	"encoding/base64"
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"path"
 	"runtime"
 	"strconv"
 	"strings"
@@ -17,15 +21,16 @@ import (
 	"github.com/coroot/coroot-node-agent/common"
 	"github.com/coroot/coroot-node-agent/ebpftracer/l7"
 	"github.com/coroot/coroot-node-agent/proc"
-	"golang.org/x/mod/semver"
+	"github.com/vishvananda/netns"
 	"golang.org/x/sys/unix"
 	"inet.af/netaddr"
 	"k8s.io/klog/v2"
 )
 
-const MaxPayloadSize = 1024 // 最大负载长度。比如 'http-length'。
+// 最大负载长度。比如 'http-length'。
+const MaxPayloadSize = 1024
 
-type EventType uint32 // .c uses default int32
+type EventType uint32
 type EventReason uint32
 
 // To be synchronized with ebpf.c definitions.
@@ -40,16 +45,11 @@ const (
 	EventTypeListenClose      EventType = 7
 	EventTypeFileOpen         EventType = 8
 	EventTypeTCPRetransmit    EventType = 9
-	EventTypePythonThreadLock EventType = 10
-)
+	EventTypeL7Request        EventType = 10
+	EventTypePythonThreadLock EventType = 11
+	EventTypeL7Response       EventType = 12
 
-const (
-	EventTypeL7Request  EventType = 101
-	EventTypeL7Response EventType = 102
-)
-
-const (
-	EventReasonUnknown EventReason = 0
+	EventReasonNone    EventReason = 0
 	EventReasonOOMKill EventReason = 1
 )
 
@@ -58,23 +58,32 @@ type TrafficStats struct {
 	BytesReceived uint64
 }
 
-// Event 类似 Flow，是建立 Span 的原始数据。
 type Event struct {
-	Type            EventType
-	Reason          EventReason
-	Pid             uint32
-	TgidReqCs       uint64 // tgid of request from client-side
-	TgidReqSs       uint64 // tgid of request from server-side
-	TgidRespSs      uint64 // tgid of response from client-side
-	TgidRespCs      uint64 // tgid of response from server-side
-	SrcAddr         netaddr.IPPort
-	DstAddr         netaddr.IPPort
-	Fd              uint64
-	Timestamp       uint64        // nanoseconds, it may be overwrite by `time.Now()`
-	KernelTimestamp uint64        // nanoseconds, it usually comes from `bpf_ktime_get_ns` directly
-	Duration        time.Duration // nanoseconds
-	L7Request       *l7.Request
-	TrafficStats    *TrafficStats
+	Type   EventType
+	Reason EventReason
+	Pid    uint32
+	// tgid of request from client-side
+	TgidReqCs uint64
+	// tgid of request from server-side
+	TgidReqSs uint64
+	// tgid of response from client-side
+	TgidRespSs uint64
+	// tgid of response from server-side
+	TgidRespCs    uint64
+	SrcAddr       netaddr.IPPort
+	DstAddr       netaddr.IPPort
+	ActualDstAddr netaddr.IPPort
+	Fd            uint64
+	// nanoseconds, it may be overwrite by `time.Now()`
+	Timestamp uint64
+	// nanoseconds, it usually comes from `bpf_ktime_get_ns` directly
+	KernelTimestamp uint64
+	// nanoseconds
+	Duration     time.Duration
+	L7Request    *l7.RequestData
+	TrafficStats *TrafficStats
+	Mnt          uint64
+	Log          bool
 }
 
 type perfMapType uint8
@@ -89,8 +98,9 @@ const (
 )
 
 type Tracer struct {
-	kernelVersion    string
 	disableL7Tracing bool
+	hostNetNs        netns.NsHandle
+	selfNetNs        netns.NsHandle
 
 	collection *ebpf.Collection
 	readers    map[string]*perf.Reader
@@ -98,13 +108,14 @@ type Tracer struct {
 	uprobes    map[string]*ebpf.Program
 }
 
-func NewTracer(kernelVersion string, disableL7Tracing bool) *Tracer {
+func NewTracer(hostNetNs, selfNetNs netns.NsHandle, disableL7Tracing bool) *Tracer {
 	if disableL7Tracing {
 		klog.Infoln("L7 tracing is disabled")
 	}
 	return &Tracer{
-		kernelVersion:    kernelVersion,
 		disableL7Tracing: disableL7Tracing,
+		hostNetNs:        hostNetNs,
+		selfNetNs:        selfNetNs,
 
 		readers: map[string]*perf.Reader{},
 		uprobes: map[string]*ebpf.Program{},
@@ -112,6 +123,9 @@ func NewTracer(kernelVersion string, disableL7Tracing bool) *Tracer {
 }
 
 func (t *Tracer) Run(events chan<- Event) error {
+	if err := proc.ExecuteInNetNs(t.hostNetNs, t.selfNetNs, ensureConntrackEventsAreEnabled); err != nil {
+		return err
+	}
 	if err := t.ebpf(events); err != nil {
 		return err
 	}
@@ -134,56 +148,6 @@ func (t *Tracer) Close() {
 	t.collection.Close()
 }
 
-// Tracer 在初始化时可能已经积压了一些事件，所以用了一些边界状态。
-func (t *Tracer) init(ch chan<- Event) error {
-	pids, err := proc.ListPids()
-	if err != nil {
-		return fmt.Errorf("failed to list pids: %w", err)
-	}
-	for _, pid := range pids {
-		ch <- Event{Type: EventTypeProcessStart, Pid: pid}
-	}
-
-	fds, sockets := readFds(pids)
-	for _, fd := range fds {
-		ch <- Event{Type: EventTypeFileOpen, Pid: fd.pid, Fd: fd.fd}
-	}
-
-	listens := map[uint64]bool{}
-	for _, s := range sockets {
-		if s.Listen {
-			listens[uint64(s.pid)<<32|uint64(s.SAddr.Port())] = true
-		}
-	}
-
-	ebpfConnectionsMap := t.collection.Maps["active_connections"]
-	timestamp := uint64(time.Now().UnixNano())
-	for _, s := range sockets {
-		typ := EventTypeConnectionOpen
-		if s.Listen {
-			typ = EventTypeListenOpen
-		} else if listens[uint64(s.pid)<<32|uint64(s.SAddr.Port())] || s.DAddr.Port() > s.SAddr.Port() { // inbound
-			continue
-		}
-		ch <- Event{
-			Type:      typ,
-			Pid:       s.pid,
-			Timestamp: timestamp,
-			Fd:        s.fd,
-			SrcAddr:   s.SAddr,
-			DstAddr:   s.DAddr,
-		}
-		if typ == EventTypeConnectionOpen {
-			id := ConnectionId{FD: s.fd, PID: s.pid}
-			conn := Connection{Timestamp: timestamp}
-			if err := ebpfConnectionsMap.Update(id, conn, ebpf.UpdateNoExist); err != nil {
-				klog.Warningln(err)
-			}
-		}
-	}
-	return nil
-}
-
 func (t *Tracer) ActiveConnectionsIterator() *ebpf.MapIterator {
 	return t.collection.Maps["active_connections"].Iterate()
 }
@@ -204,31 +168,55 @@ type perfMap struct {
 	name                  string
 	perCPUBufferSizePages int
 	typ                   perfMapType
+	readTimeout           time.Duration
 }
 
 func (t *Tracer) ebpf(ch chan<- Event) error {
-	if _, ok := ebpfProg[runtime.GOARCH]; !ok {
+	if _, ok := ebpfProgs[runtime.GOARCH]; !ok {
 		return fmt.Errorf("unsupported architecture: %s", runtime.GOARCH)
 	}
-	kv := "v" + common.KernelMajorMinor(t.kernelVersion)
-	var prg []byte
-	for _, p := range ebpfProg[runtime.GOARCH] {
-		if semver.Compare(kv, p.v) >= 0 {
-			prg = p.p
+
+	var traceFsPath string
+	for _, p := range []string{"/sys/kernel/debug/tracing", "/sys/kernel/tracing"} {
+		if _, err := os.Stat(p); err == nil {
+			traceFsPath = p
 			break
 		}
 	}
-	if len(prg) == 0 {
-		return fmt.Errorf("unsupported kernel version: %s", t.kernelVersion)
-	}
-	_, debugFsErr := os.Stat("/sys/kernel/debug/tracing")
-	_, traceFsErr := os.Stat("/sys/kernel/tracing")
-
-	if debugFsErr != nil && traceFsErr != nil {
+	if traceFsPath == "" {
 		return fmt.Errorf("kernel tracing is not available: debugfs or tracefs must be mounted")
 	}
 
-	collectionSpec, err := ebpf.LoadCollectionSpecFromReader(bytes.NewReader(prg))
+	var flags string
+	if isCtxExtraPaddingRequired(traceFsPath) {
+		flags = "ctx-extra-padding"
+	}
+	kv := common.GetKernelVersion()
+	var prog []byte
+	for _, p := range ebpfProgs[runtime.GOARCH] {
+		pv, _ := common.VersionFromString(p.version)
+		if !kv.GreaterOrEqual(pv) {
+			continue
+		}
+		if flags != p.flags {
+			continue
+		}
+		prog = p.prog
+		break
+	}
+	if len(prog) == 0 {
+		return fmt.Errorf("unsupported kernel version: %s %s", kv, flags)
+	}
+
+	reader, err := gzip.NewReader(base64.NewDecoder(base64.StdEncoding, bytes.NewReader(prog)))
+	if err != nil {
+		return fmt.Errorf("invalid program encoding: %w", err)
+	}
+	prog, err = io.ReadAll(reader)
+	if err != nil {
+		return fmt.Errorf("failed to ungzip program: %w", err)
+	}
+	collectionSpec, err := ebpf.LoadCollectionSpecFromReader(bytes.NewReader(prog))
 	if err != nil {
 		return fmt.Errorf("failed to load collection spec: %w", err)
 	}
@@ -237,9 +225,9 @@ func (t *Tracer) ebpf(ch chan<- Event) error {
 		//Programs: ebpf.ProgramOptions{LogLevel: 2, LogSize: 20 * 1024 * 1024},
 	})
 	if err != nil {
-		var verr *ebpf.VerifierError
-		if errors.As(err, &verr) {
-			klog.Errorf("%+v", verr)
+		var vErr *ebpf.VerifierError
+		if errors.As(err, &vErr) {
+			klog.Errorf("%+v", vErr)
 		}
 		return fmt.Errorf("failed to load collection: %w", err)
 	}
@@ -248,29 +236,33 @@ func (t *Tracer) ebpf(ch chan<- Event) error {
 	perfMaps := []perfMap{
 		{name: "proc_events", typ: perfMapTypeProcEvents, perCPUBufferSizePages: 4},
 		{name: "tcp_listen_events", typ: perfMapTypeTCPEvents, perCPUBufferSizePages: 4},
-		{name: "tcp_connect_events", typ: perfMapTypeTCPEvents, perCPUBufferSizePages: 8},
+		{name: "tcp_connect_events", typ: perfMapTypeTCPEvents, perCPUBufferSizePages: 8, readTimeout: 10 * time.Millisecond},
 		{name: "tcp_retransmit_events", typ: perfMapTypeTCPEvents, perCPUBufferSizePages: 4},
 		{name: "file_events", typ: perfMapTypeFileEvents, perCPUBufferSizePages: 4},
 		{name: "python_thread_events", typ: perfMapTypePythonThreadEvents, perCPUBufferSizePages: 4},
-		{name: "l7_events", typ: perfMapTypeL7Events, perCPUBufferSizePages: 32},
-		{name: "l7_events_ss", typ: perfMapTypeL7SSEvents, perCPUBufferSizePages: 32},
 	}
 
+	if !t.disableL7Tracing {
+		perfMaps = append(perfMaps, perfMap{name: "l7_events", typ: perfMapTypeL7Events, perCPUBufferSizePages: 32})
+		perfMaps = append(perfMaps, perfMap{name: "l7_events_ss", typ: perfMapTypeL7SSEvents, perCPUBufferSizePages: 32})
+	}
+
+	pageSize := os.Getpagesize()
 	for _, pm := range perfMaps {
-		r, err := perf.NewReader(t.collection.Maps[pm.name], pm.perCPUBufferSizePages*os.Getpagesize())
+		r, err := perf.NewReaderWithOptions(t.collection.Maps[pm.name], pm.perCPUBufferSizePages*pageSize, perf.ReaderOptions{WakeupEvents: 100})
 		if err != nil {
 			t.Close()
 			return fmt.Errorf("failed to create ebpf reader: %w", err)
 		}
 		t.readers[pm.name] = r
-		go runEventsReader(pm.name, r, ch, pm.typ)
+		go runEventsReader(pm.name, r, ch, pm.typ, pm.readTimeout)
 	}
 
 	for _, programSpec := range collectionSpec.Programs {
 		program := t.collection.Programs[programSpec.Name]
 		if t.disableL7Tracing {
 			switch programSpec.Name {
-			case "sys_enter_write", "sys_enter_writev", "sys_enter_sendto", "sys_enter_sendmsg", "sys_enter_sendmmsg":
+			case "sys_enter_writev", "sys_enter_write", "sys_enter_sendto", "sys_enter_sendmsg", "sys_enter_sendmmsg":
 				continue
 			case "sys_exit_write", "sys_exit_writev", "sys_exit_sendto", "sys_exit_sendmsg":
 				continue
@@ -291,10 +283,14 @@ func (t *Tracer) ebpf(ch chan<- Event) error {
 				continue
 			}
 			l, err = link.Kprobe(programSpec.AttachTo, program, nil)
+			if err != nil && programSpec.SectionName == "kprobe/nf_ct_deliver_cached_events" {
+				klog.Warningln("nf_conntrack may not be in use:", err)
+				continue
+			}
 		}
 		if err != nil {
 			t.Close()
-			return fmt.Errorf("failed to link program: %w", err)
+			return fmt.Errorf("failed to link program '%s': %w", programSpec.Name, err)
 		}
 		t.links = append(t.links, l)
 	}
@@ -344,23 +340,28 @@ type procEvent struct {
 
 // To be synchronized with `struct tcp_event`.
 type tcpEvent struct {
-	Fd            uint64
+	Fd uint64
+	// nanoseconds
 	Timestamp     uint64
-	Duration      uint64 // nanoseconds
+	Duration      uint64
 	Type          EventType
 	Pid           uint32
 	BytesSent     uint64
 	BytesReceived uint64
 	SPort         uint16
 	DPort         uint16
-	SAddr         [16]byte // supports IPv4 in IPv6
+	Aport         uint16
+	SAddr         [16]byte
 	DAddr         [16]byte
+	AAddr         [16]byte
 }
 
 type fileEvent struct {
 	Type EventType
 	Pid  uint32
 	Fd   uint64
+	Mnt  uint64
+	Log  uint64
 }
 
 // To be synchronized with `struct l7_event`.
@@ -371,78 +372,85 @@ type l7Event struct {
 	TgidWrite           uint64
 	TgidRead            uint64
 	Status              uint32
-	Duration            uint64 // nanoseconds
-	Protocol            uint8
-	Method              uint8
-	Padding             uint16
-	StatementId         uint32
-	PayloadSize         uint64
+	// nanoseconds
+	Duration    uint64
+	Protocol    uint8
+	Method      uint8
+	Padding     uint16
+	StatementId uint32
+	PayloadSize uint64
 }
 
 // To be synchronized with `struct l7_event_ss`, based on server-side monitoring.
 type l7EventSS struct {
-	Fd          uint64
-	Pid         uint32
-	Timestamp   uint64
-	Duration    uint64 // nanoseconds
+	Fd        uint64
+	Pid       uint32
+	Timestamp uint64
+	// nanoseconds
+	Duration    uint64
 	StatementId uint32
 	TgidRead    uint64
 	TgidWrite   uint64
 }
 
 type pythonThreadEvent struct {
-	Type     EventType
-	Pid      uint32
-	Duration uint64 // nanoseconds
+	Type EventType
+	Pid  uint32
+	// nanoseconds
+	Duration uint64
 }
 
-func runEventsReader(name string, r *perf.Reader, ch chan<- Event, typ perfMapType) {
+func runEventsReader(name string, r *perf.Reader, ch chan<- Event, typ perfMapType, readTimeout time.Duration) {
+	if readTimeout == 0 {
+		readTimeout = 100 * time.Millisecond
+	}
 	for {
-		record, err := r.Read()
+		r.SetDeadline(time.Now().Add(readTimeout))
+		rec, err := r.Read()
 		if err != nil {
 			if errors.Is(err, perf.ErrClosed) {
 				break
 			}
 			continue
 		}
-		if record.LostSamples > 0 {
-			klog.Errorln(name, "lost samples:", record.LostSamples)
+		if rec.LostSamples > 0 {
+			klog.Errorln(name, "lost samples:", rec.LostSamples)
 			continue
 		}
 		var event Event
 
 		switch typ {
 		case perfMapTypeL7Events:
-			l7Event := &l7Event{}
-			reader := bytes.NewBuffer(record.RawSample)
-			if err := binary.Read(reader, binary.LittleEndian, l7Event); err != nil {
-				klog.Warningln("failed to read from l7_events PerfMap: ", err)
+			v := &l7Event{}
+			reader := bytes.NewBuffer(rec.RawSample)
+			if err := binary.Read(reader, binary.LittleEndian, v); err != nil {
+				klog.Warningln("failed to read msg:", err)
 				continue
 			}
-			payload := reader.Bytes() // `Bytes` holds the unread portion of the buffer
-			req := &l7.Request{
-				Protocol: l7.Protocol(l7Event.Protocol),
-				Status:   l7.Status(l7Event.Status),
-				Duration: time.Duration(l7Event.Duration),
-				Method:   l7.Method(l7Event.Method),
-				ID:       l7Event.StatementId,
+			// `Bytes` holds the unread portion of the buffer
+			payload := reader.Bytes()
+			req := &l7.RequestData{
+				Protocol:    l7.Protocol(v.Protocol),
+				Status:      l7.Status(v.Status),
+				Duration:    time.Duration(v.Duration),
+				Method:      l7.Method(v.Method),
+				StatementId: v.StatementId,
 			}
 			switch {
-			case l7Event.PayloadSize == 0:
-			case l7Event.PayloadSize > MaxPayloadSize:
+			case v.PayloadSize == 0:
+			case v.PayloadSize > MaxPayloadSize:
 				req.Payload = payload[:MaxPayloadSize]
 			default:
-				req.Payload = payload[:l7Event.PayloadSize]
+				req.Payload = payload[:v.PayloadSize]
 			}
 			event = Event{
 				Type:       EventTypeL7Request,
-				Pid:        l7Event.Pid,
-				TgidReqCs:  l7Event.TgidWrite,
-				TgidRespCs: l7Event.TgidRead,
-				Fd:         l7Event.Fd,
-				//Timestamp:  l7Event.ConnectionTimestamp, // shouldn't use this kernel timestamp
-				Duration:  time.Duration(l7Event.Duration),
-				L7Request: req}
+				Pid:        v.Pid,
+				TgidReqCs:  v.TgidWrite,
+				TgidRespCs: v.TgidRead,
+				Fd:         v.Fd,
+				Duration:   time.Duration(v.Duration),
+				L7Request:  req}
 		case perfMapTypeL7SSEvents:
 			l7EventSS := &l7EventSS{}
 			reader := bytes.NewBuffer(record.RawSample)
@@ -461,21 +469,21 @@ func runEventsReader(name string, r *perf.Reader, ch chan<- Event, typ perfMapTy
 			}
 		case perfMapTypeFileEvents:
 			v := &fileEvent{}
-			if err := binary.Read(bytes.NewBuffer(record.RawSample), binary.LittleEndian, v); err != nil {
+			if err := binary.Read(bytes.NewBuffer(rec.RawSample), binary.LittleEndian, v); err != nil {
 				klog.Warningln("failed to read msg:", err)
 				continue
 			}
-			event = Event{Type: v.Type, Pid: v.Pid, Fd: v.Fd}
+			event = Event{Type: v.Type, Pid: v.Pid, Fd: v.Fd, Mnt: v.Mnt, Log: v.Log > 0}
 		case perfMapTypeProcEvents:
 			v := &procEvent{}
-			if err := binary.Read(bytes.NewBuffer(record.RawSample), binary.LittleEndian, v); err != nil {
+			if err := binary.Read(bytes.NewBuffer(rec.RawSample), binary.LittleEndian, v); err != nil {
 				klog.Warningln("failed to read msg:", err)
 				continue
 			}
 			event = Event{Type: v.Type, Reason: EventReason(v.Reason), Pid: v.Pid}
 		case perfMapTypeTCPEvents:
 			v := &tcpEvent{}
-			if err := binary.Read(bytes.NewBuffer(record.RawSample), binary.LittleEndian, v); err != nil {
+			if err := binary.Read(bytes.NewBuffer(rec.RawSample), binary.LittleEndian, v); err != nil {
 				klog.Warningln("failed to read msg:", err)
 				continue
 			}
@@ -484,6 +492,7 @@ func runEventsReader(name string, r *perf.Reader, ch chan<- Event, typ perfMapTy
 				Pid:             v.Pid,
 				SrcAddr:         ipPort(v.SAddr, v.SPort),
 				DstAddr:         ipPort(v.DAddr, v.DPort),
+				ActualDstAddr:   ipPort(v.AAddr, v.Aport),
 				Fd:              v.Fd,
 				Timestamp:       v.Timestamp,
 				KernelTimestamp: v.Timestamp,
@@ -497,7 +506,7 @@ func runEventsReader(name string, r *perf.Reader, ch chan<- Event, typ perfMapTy
 			}
 		case perfMapTypePythonThreadEvents:
 			v := &pythonThreadEvent{}
-			if err := binary.Read(bytes.NewBuffer(record.RawSample), binary.LittleEndian, v); err != nil {
+			if err := binary.Read(bytes.NewBuffer(rec.RawSample), binary.LittleEndian, v); err != nil {
 				klog.Warningln("failed to read msg:", err)
 				continue
 			}
@@ -510,7 +519,6 @@ func runEventsReader(name string, r *perf.Reader, ch chan<- Event, typ perfMapTy
 			continue
 		}
 
-		// 写入到 eBPF 消息队列
 		ch <- event
 	}
 }
@@ -518,4 +526,40 @@ func runEventsReader(name string, r *perf.Reader, ch chan<- Event, typ perfMapTy
 func ipPort(ip [16]byte, port uint16) netaddr.IPPort {
 	i, _ := netaddr.FromStdIP(ip[:])
 	return netaddr.IPPortFrom(i, port)
+}
+
+func isCtxExtraPaddingRequired(traceFsPath string) bool {
+	f, err := os.Open(path.Join(traceFsPath, "events/task/task_newtask/format"))
+	if err != nil {
+		klog.Errorln(err)
+		return false
+	}
+	defer f.Close()
+	data, err := io.ReadAll(f)
+	if err != nil {
+		klog.Errorln(err)
+		return false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.Contains(line, "common_preempt_lazy_count") {
+			return true
+		}
+	}
+	return false
+}
+
+const nfConntrackEventsParameterPath = "/proc/sys/net/netfilter/nf_conntrack_events"
+
+func ensureConntrackEventsAreEnabled() error {
+	v, err := common.ReadUintFromFile(nfConntrackEventsParameterPath)
+	if err != nil {
+		return err
+	}
+	if v != 1 {
+		klog.Infof("%s = %d, setting to 1", nfConntrackEventsParameterPath, v)
+		if err = os.WriteFile(nfConntrackEventsParameterPath, []byte("1"), 0644); err != nil {
+			return err
+		}
+	}
+	return nil
 }

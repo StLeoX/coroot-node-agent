@@ -4,8 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"github.com/coroot/coroot-node-agent/ebpftracer"
-	"strconv"
 	"time"
 
 	"github.com/coroot/coroot-node-agent/common"
@@ -19,12 +17,14 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.18.0"
 	"go.opentelemetry.io/otel/trace"
-	"inet.af/netaddr"
 	"k8s.io/klog/v2"
 )
 
 var (
-	tracer func(containerId string) trace.Tracer
+	batcher             sdktrace.TracerProviderOption
+	commonResourceAttrs []attribute.KeyValue
+	agentVersion        string
+	initialized         bool
 )
 
 func Init(machineId, hostname, version string) {
@@ -33,7 +33,7 @@ func Init(machineId, hostname, version string) {
 		klog.Infoln("no OpenTelemetry traces collector endpoint configured")
 		return
 	}
-	klog.Infoln("OpenTelemetry traces exporter endpoint:", endpointUrl.String())
+	klog.Infoln("OpenTelemetry traces collector endpoint:", endpointUrl.String())
 	path := endpointUrl.Path
 	if path == "" {
 		path = "/"
@@ -48,30 +48,49 @@ func Init(machineId, hostname, version string) {
 		opts = append(opts, otlptracehttp.WithInsecure())
 	}
 	client := otlptracehttp.NewClient(opts...)
-	exporter, err := otlptrace.New(context.Background(), client) // and this exporter starts
+	exporter, err := otlptrace.New(context.Background(), client)
 	if err != nil {
 		klog.Exitln(err)
 	}
 
-	batcher := sdktrace.WithBatcher(exporter)
+	batcher = sdktrace.WithBatcher(exporter)
+	commonResourceAttrs = []attribute.KeyValue{semconv.HostName(hostname), semconv.HostID(machineId)}
+	agentVersion = version
+	initialized = true
+}
 
-	tracer = func(containerId string) trace.Tracer {
-		provider := sdktrace.NewTracerProvider(
-			batcher,
-			sdktrace.WithResource(resource.NewWithAttributes(
-				semconv.SchemaURL,
-				semconv.HostName(hostname),
-				semconv.HostID(machineId),
+type Tracer struct {
+	otel trace.Tracer
+}
+
+func GetContainerTracer(containerId string) *Tracer {
+	if !initialized {
+		return &Tracer{otel: nil}
+	}
+	provider := sdktrace.NewTracerProvider(
+		batcher,
+		sdktrace.WithResource(resource.NewWithAttributes(
+			semconv.SchemaURL,
+			append(
+				commonResourceAttrs,
 				semconv.ServiceName(common.ContainerIdToOtelServiceName(containerId)),
 				semconv.ContainerID(containerId),
-			)),
-		)
-		return provider.Tracer("coroot-node-agent", trace.WithInstrumentationVersion(version))
-	}
+			)...,
+		)),
+	)
+	return &Tracer{otel: provider.Tracer("coroot-node-agent", trace.WithInstrumentationVersion(agentVersion))}
+}
+
+func (t *Tracer) NewTrace(destination common.HostPort) *Trace {
+	return &Trace{tracer: t, destination: destination, commonAttrs: []attribute.KeyValue{
+		semconv.NetPeerName(destination.Host()),
+		semconv.NetPeerPort(int(destination.Port())),
+	}}
 }
 
 // SpanBuilder manages resource attributes. Others manage span attributes.
 type SpanBuilder struct {
+	tracer      *Tracer
 	containerId string
 	destination netaddr.IPPort
 	startTime   time.Time
@@ -100,7 +119,7 @@ func (b *SpanBuilder) createSpan(name string, duration time.Duration, error bool
 	// todo 不管之前如何滥用时间字段，这里完全在使用 process time，这一点可以使用 event time，因为中间会存在 agent 处理耗时。
 	end := time.Now()
 	start := end.Add(-duration)
-	_, span := tracer(b.containerId).Start(context.Background(), name, trace.WithTimestamp(start), trace.WithSpanKind(trace.SpanKindClient))
+	_, span := b.tracer.otel.Start(context.Background(), name, trace.WithTimestamp(start), trace.WithSpanKind(trace.SpanKindClient))
 	span.SetAttributes(attrs...)
 	span.SetAttributes(b.commonAttrs...)
 	if error {

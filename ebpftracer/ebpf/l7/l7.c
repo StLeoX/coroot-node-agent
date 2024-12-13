@@ -61,12 +61,16 @@
 
 struct l7_event {
     __u64 fd;
-    __u64 connection_timestamp;  // connection timestamp instead of the span start timestamp, actually unused from the GoLang part
+    // connection timestamp instead of the span start timestamp, actually unused from the GoLang part
+    __u64 connection_timestamp;
     __u32 pid;
-    __u64 tgid_write;  // tgid who sends the request
-    __u64 tgid_read;  // tgid who receives the response
+    // tgid who sends the request
+    __u64 tgid_write;
+    // tgid who receives the response
+    __u64 tgid_read;
     __u32 status;
-    __u64 duration;  // nanoseconds, from `bpf_ktime_get_ns`
+    // nanoseconds, from `bpf_ktime_get_ns`
+    __u64 duration;
     __u8 protocol;
     __u8 method;
     __u16 padding;
@@ -75,18 +79,21 @@ struct l7_event {
     char payload[MAX_PAYLOAD_SIZE];
 } __attribute__((packed));
 
+// non-historical store, Array, not LRU
+// heap is used to share (and save) memory between each protocol parser
 struct {
-     __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);  // non-historical store, Array, not LRU
+     __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
      __type(key, int);
      __type(value, struct l7_event);
      __uint(max_entries, 1);
-} l7_event_heap SEC(".maps");  // heap is used to share (and save) memory between each protocol parser
+} l7_event_heap SEC(".maps");
 
+// PerfMap's specific map format
 struct {
     __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
     __uint(key_size, sizeof(int));
     __uint(value_size, sizeof(int));
-} l7_events SEC(".maps");  // PerfMap's specific map format
+} l7_events SEC(".maps");
 
 struct read_args {
     __u64 fd;
@@ -95,9 +102,10 @@ struct read_args {
     __u64 iovlen;
 };
 
+// active_io uses tgid, or introduced goroutine_id, as the smallest executor.
 struct {
     __uint(type, BPF_MAP_TYPE_LRU_HASH);
-    __uint(key_size, sizeof(__u64));  // Uses tgid, or introduced goroutine_id. Totally matches the smallest executor.
+    __uint(key_size, sizeof(__u64));
     __uint(value_size, sizeof(struct read_args));
     __uint(max_entries, 10240);
 } active_reads SEC(".maps");
@@ -109,10 +117,13 @@ struct l7_request_key {
     __s16 stream_id;
 };
 
-struct l7_request {  // more like concept `flow`, maybe request, maybe response
-    __u64 ns;  // timestamp when sends the request
-    __u64 tgid_send;  // tgid who sends the request
-    __u64 tgid_recv;  // tgid who receives the response, unused actually
+struct l7_request {
+    // timestamp when sends the request
+    __u64 ns;
+    // tgid who sends the request
+    __u64 tgid_send;
+    // tgid who receives the response, unused actually
+    __u64 tgid_recv;
     __u8 protocol;
     __u8 partial;
     __u8 request_type;
@@ -121,19 +132,21 @@ struct l7_request {  // more like concept `flow`, maybe request, maybe response
     char payload[MAX_PAYLOAD_SIZE];
 };
 
+// heap is used to share memory. Besides, eBPF stack has limited memory.
 struct {
      __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
      __type(key, int);
      __type(value, struct l7_request);
      __uint(max_entries, 1);
-} l7_request_heap SEC(".maps");  // Heap is used to share memory. Besides, eBPF stack has limited memory.
+} l7_request_heap SEC(".maps");
 
+// like `active_connections`, limited to client-side
 struct {
     __uint(type, BPF_MAP_TYPE_LRU_HASH);
     __uint(key_size, sizeof(struct l7_request_key));
     __uint(value_size, sizeof(struct l7_request));
     __uint(max_entries, 32768);
-} active_l7_requests SEC(".maps");  // 类似 `active_connections`，是针对 L7 的，同样限制于 client-side。
+} active_l7_requests SEC(".maps");
 
 struct {
      __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
@@ -144,19 +157,17 @@ struct {
 
 struct trace_event_raw_sys_enter_rw__stub {
     __u64 unused;
-    long int id;  // 系统调用编号，表示当前调用的具体系统调用，比如在 sys_enter_write 中应该是 SYS_write，即 write 的系统调用号。
-    __u64 fd;  // write 系统调用的第一个参数，表示文件描述符（file descriptor，fd），指明数据要写入的文件或设备。
-    char* buf;  // write 系统调用的第二个参数，表示要写入的数据的缓冲区地址，这个指针指向用户空间的缓冲区。
-    __u64 size;  // write 系统调用的第三个参数，表示要写入的字节数。
+    // 未使用。系统调用编号，表示当前调用的具体系统调用，比如在 sys_enter_write 中应该是 SYS_write，即 write 的系统调用号。
+    __u64 unused2;
+    // write 系统调用的第一个参数，表示文件描述符（file descriptor，fd），指明数据要写入的文件或设备。
+    __u64 fd;
+    // write 系统调用的第二个参数，表示要写入的数据的缓冲区地址，这个指针指向用户空间的缓冲区。
+    char* buf;
+    // write 系统调用的第三个参数，表示要写入的字节数。
+    __u64 size;
 };
 
-struct trace_event_raw_sys_exit_rw__stub {
-    __u64 unused;
-    long int id;  // 系统调用号，可以用来确认是否是 read 系统调用。
-    long int ret;  // 系统调用返回值，即 read 返回的值。调用成功时为读取的字节数，失败时为负数的错误码。
-};
-
-// I/O vector, parameter for readv/writev
+// I/O vector：readv/writev 参数
 struct iovec {
     char* buf;
     __u64 size;
@@ -250,7 +261,6 @@ int trace_enter_write(void *ctx, __u64 fd, __u16 is_tls, char *buf, __u64 size, 
         return 0;
     }
 
-    /* 对于 heap 的更新方式有两种。一种是这样先 lookup 再写成员。另一种是用 update ANY 写结构体。 */
     // reset req
     req->ns = 0;
     req->tgid_send = 0;
@@ -269,7 +279,8 @@ int trace_enter_write(void *ctx, __u64 fd, __u16 is_tls, char *buf, __u64 size, 
     if (is_http_request(payload)) {
         req->protocol = PROTOCOL_HTTP;
     } else if (is_postgres_query(payload, size, &req->request_type)) {
-        if (req->request_type == POSTGRES_FRAME_CLOSE) {  // this request is the end of the pg stream query
+        // this request is the end of the pg stream query
+        if (req->request_type == POSTGRES_FRAME_CLOSE) {
             struct l7_event *e = bpf_map_lookup_elem(&l7_event_heap, &zero);
             if (!e) {
                 return 0;
@@ -277,7 +288,7 @@ int trace_enter_write(void *ctx, __u64 fd, __u16 is_tls, char *buf, __u64 size, 
             e->protocol = PROTOCOL_POSTGRES;
             e->method = METHOD_STATEMENT_CLOSE;
             e->tgid_write = write_tgid;
-            e->tgid_read = write_tgid;  // maybe the pg_server is single thread, for networking
+            e->tgid_read = write_tgid;  // todo
             e->payload_size = size;
             COPY_PAYLOAD(e->payload, size, payload);
             send_event(ctx, e, cid, conn);
@@ -289,7 +300,8 @@ int trace_enter_write(void *ctx, __u64 fd, __u16 is_tls, char *buf, __u64 size, 
     } else if (is_memcached_query(payload, size)) {
         req->protocol = PROTOCOL_MEMCACHED;
     } else if (is_mysql_query(payload, size, &req->request_type)) {
-        if (req->request_type == MYSQL_COM_STMT_CLOSE) {  // this request is the end of the mysql stream query
+        // this request is the end of the mysql stream query
+        if (req->request_type == MYSQL_COM_STMT_CLOSE) {
             struct l7_event *e = bpf_map_lookup_elem(&l7_event_heap, &zero);
             if (!e) {
                 return 0;
@@ -297,7 +309,7 @@ int trace_enter_write(void *ctx, __u64 fd, __u16 is_tls, char *buf, __u64 size, 
             e->protocol = PROTOCOL_MYSQL;
             e->method = METHOD_STATEMENT_CLOSE;
             e->tgid_write = write_tgid;
-            e->tgid_read = write_tgid;  // maybe the mysqld is single thread, for networking
+            e->tgid_read = write_tgid;  // todo
             e->payload_size = size;
             COPY_PAYLOAD(e->payload, size, payload);
             send_event(ctx, e, cid, conn);
@@ -314,7 +326,7 @@ int trace_enter_write(void *ctx, __u64 fd, __u16 is_tls, char *buf, __u64 size, 
         e->protocol = PROTOCOL_RABBITMQ;
         e->method = METHOD_PRODUCE;
         e->tgid_write = write_tgid;
-        e->tgid_read = write_tgid;  // checkme
+        e->tgid_read = write_tgid;  // todo
         send_event(ctx, e, cid, conn);
         return 0;
     } else if (nats_method(payload, size) == METHOD_PRODUCE) {
@@ -325,7 +337,7 @@ int trace_enter_write(void *ctx, __u64 fd, __u16 is_tls, char *buf, __u64 size, 
         e->protocol = PROTOCOL_NATS;
         e->method = METHOD_PRODUCE;
         e->tgid_write = write_tgid;
-        e->tgid_read = write_tgid;
+        e->tgid_read = write_tgid;  // todo
         send_event(ctx, e, cid, conn);
         return 0;
     } else if (is_cassandra_request(payload, size, &k.stream_id)) {
@@ -333,8 +345,9 @@ int trace_enter_write(void *ctx, __u64 fd, __u16 is_tls, char *buf, __u64 size, 
     } else if (is_kafka_request(payload, size, &req->request_id)) {
         req->protocol = PROTOCOL_KAFKA;
         struct l7_request *prev_req = bpf_map_lookup_elem(&active_l7_requests, &k);
+        // Kafka's streaming makes timestamp passes on
         if (prev_req && prev_req->protocol == PROTOCOL_KAFKA) {
-            req->ns = prev_req->ns; // 这是由 Kafka 协议的“流水线”特性决定的。
+            req->ns = prev_req->ns;
         }
     } else if (looks_like_http2_frame(payload, size, METHOD_HTTP2_CLIENT_FRAMES)) {
         struct l7_event *e = bpf_map_lookup_elem(&l7_event_heap, &zero);
@@ -362,10 +375,9 @@ int trace_enter_write(void *ctx, __u64 fd, __u16 is_tls, char *buf, __u64 size, 
     req->ns = write_ns;
     req->tgid_send = write_tgid;
     req->tgid_recv = 0;
-
     COPY_PAYLOAD(req->payload, size, payload);
 
-    bpf_map_update_elem(&active_l7_requests, &k, req, BPF_NOEXIST);  // req is REQUEST
+    bpf_map_update_elem(&active_l7_requests, &k, req, BPF_NOEXIST);
     return 0;
 }
 
@@ -414,8 +426,8 @@ int trace_exit_read(void *ctx, __u64 id, __u32 pid, __u16 is_tls, long int ret) 
     cid.pid = pid;
     cid.fd = args->fd;
     struct connection *conn = bpf_map_lookup_elem(&active_connections, &cid);
-    bpf_map_delete_elem(&active_reads, &id);
     if (!conn) {
+        bpf_map_delete_elem(&active_reads, &id);
         return 0;
     }
 
@@ -425,18 +437,23 @@ int trace_exit_read(void *ctx, __u64 id, __u32 pid, __u16 is_tls, long int ret) 
     k.is_tls = is_tls;
     k.stream_id = -1;
 
-    if (ret <= 0) {  // ret < 0, error in SYS_read; ret = 0, meets special file likes pipe.
+    bpf_map_delete_elem(&active_reads, &id);
+
+    // ret < 0, error in SYS_read.
+    // ret = 0, meets special file likes pipe.
+    // ret > 0, count of bytes exchanged.
+    if (ret <= 0) {
         return 0;
     }
     if (args->ret) {
         if (bpf_probe_read(&ret, sizeof(ret), (void*)args->ret)) {
             return 0;
-        }
+        };
         if (ret <= 0) {
             return 0;
         }
     }
-    __u64 total_size = ret;  // I/O related syscalls return bytes exchanged.
+    __u64 total_size = ret;
     int zero = 0;
     char* payload = args->buf;
     if (args->iovlen) {
@@ -485,7 +502,8 @@ int trace_exit_read(void *ctx, __u64 id, __u32 pid, __u16 is_tls, long int ret) 
     }
 
     struct l7_request *req = bpf_map_lookup_elem(&active_l7_requests, &k);
-    int is_response = 0;  // 0: no, 1: yes, 2: partially
+    // Is this response? 0: no, 1: yes, 2: partially
+    int response = 0;
     if (!req) {
         if (is_dns_response(payload, ret, &k.stream_id, &e->status)) {
             req = bpf_map_lookup_elem(&active_l7_requests, &k);
@@ -504,7 +522,7 @@ int trace_exit_read(void *ctx, __u64 id, __u32 pid, __u16 is_tls, long int ret) 
             if (!req) {
                 return 0;
             }
-            is_response = 1;
+            response = 1;
         } else if (looks_like_http2_frame(payload, ret, METHOD_HTTP2_SERVER_FRAMES)) {
             e->protocol = PROTOCOL_HTTP2;
             e->method = METHOD_HTTP2_SERVER_FRAMES;
@@ -525,43 +543,43 @@ int trace_exit_read(void *ctx, __u64 id, __u32 pid, __u16 is_tls, long int ret) 
 
     bpf_map_delete_elem(&active_l7_requests, &k);
     if (e->protocol == PROTOCOL_HTTP) {
-        is_response = is_http_response(payload, &e->status);
+        response = is_http_response(payload, &e->status);
     } else if (e->protocol == PROTOCOL_POSTGRES) {
-        is_response = is_postgres_response(payload, ret, &e->status);
+        response = is_postgres_response(payload, ret, &e->status);
         if (req->request_type == POSTGRES_FRAME_PARSE) {
             e->method = METHOD_STATEMENT_PREPARE;
         }
     } else if (e->protocol == PROTOCOL_REDIS) {
-        is_response = is_redis_response(payload, ret, &e->status);
+        response = is_redis_response(payload, ret, &e->status);
     } else if (e->protocol == PROTOCOL_MEMCACHED) {
-        is_response = is_memcached_response(payload, ret, &e->status);
+        response = is_memcached_response(payload, ret, &e->status);
     } else if (e->protocol == PROTOCOL_MYSQL) {
-        is_response = is_mysql_response(payload, ret, req->request_type, &e->statement_id, &e->status);
+        response = is_mysql_response(payload, ret, req->request_type, &e->statement_id, &e->status);
         if (req->request_type == MYSQL_COM_STMT_PREPARE) {
             e->method = METHOD_STATEMENT_PREPARE;
         }
     } else if (e->protocol == PROTOCOL_MONGO) {
-        is_response = is_mongo_response(payload, ret, req->partial);
-        if (is_response == 2) { // partially
-            struct l7_request *prev_req = bpf_map_lookup_elem(&l7_request_heap, &zero);
-            if (!prev_req) {
+        response = is_mongo_response(payload, ret, req->partial);
+        if (response == 2) { // partial
+            struct l7_request *r = bpf_map_lookup_elem(&l7_request_heap, &zero);
+            if (!r) {
                 return 0;
             }
-            prev_req->partial = 1;
-            prev_req->protocol = e->protocol;
-            prev_req->ns = req->ns;
-            prev_req->payload_size = req->payload_size;
-            COPY_PAYLOAD(prev_req->payload, req->payload_size, req->payload);
-            bpf_map_update_elem(&active_l7_requests, &k, prev_req, BPF_ANY);
+            r->partial = 1;
+            r->protocol = e->protocol;
+            r->ns = req->ns;
+            r->payload_size = req->payload_size;
+            COPY_PAYLOAD(r->payload, req->payload_size, req->payload);
+            bpf_map_update_elem(&active_l7_requests, &k, r, BPF_ANY);
             return 0;
         }
     } else if (e->protocol == PROTOCOL_KAFKA) {
-        is_response = is_kafka_response(payload, req->request_id);
+        response = is_kafka_response(payload, req->request_id);
     } else if (e->protocol == PROTOCOL_DUBBO2) {
-        is_response = is_dubbo2_response(payload, &e->status);
+        response = is_dubbo2_response(payload, &e->status);
     }
 
-    if (!is_response) {
+    if (!response) {
         return 0;
     }
 
@@ -576,20 +594,28 @@ int trace_exit_read(void *ctx, __u64 id, __u32 pid, __u16 is_tls, long int ret) 
 // L7 request monitoring from the server-side. First READ then WRITE.
 
 struct l7_event_ss {
-    __u64 fd;  // server socket fd
-    __u32 pid;  // server pid
-    __u64 timestamp;  // (kernel) timestamp when reading request
-    __u64 duration;  // duration to nanoseconds when writing response to client, used from the GoLang part
-    __u32 statement_id;  // some protocols may support request_id, like MySQL
-    __u64 tgid_read;  // tgid who receives the request
-    __u64 tgid_write;  // tgid who sends the response
+    // server socket fd
+    __u64 fd;
+    // server pid
+    __u32 pid;
+    // (kernel) timestamp when reading request
+    __u64 timestamp;
+    // duration to nanoseconds when writing response to client, used from the GoLang part
+    __u64 duration;
+    // some protocols may support request_id, like MySQL
+    __u32 statement_id;
+    // tgid who receives the request
+    __u64 tgid_read;
+    // tgid who sends the response
+    __u64 tgid_write;
 } __attribute__((packed));
 
+// PerfMap's specific map format
 struct {
     __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
     __uint(key_size, sizeof(int));
     __uint(value_size, sizeof(int));
-} l7_events_ss SEC(".maps");  // PerfMap's specific map format
+} l7_events_ss SEC(".maps");
 
 struct l7_response_key {
     __u64 fd;
@@ -597,8 +623,10 @@ struct l7_response_key {
 };
 
 struct l7_response {
-    __u64 ns;  // (kernel) timestamp when receives the request
-    __u64 tgid_recv;  // tgid who receives the request
+    // (kernel) timestamp when receives the request
+    __u64 ns;
+    // tgid who receives the request
+    __u64 tgid_recv;
 };
 
 struct {
@@ -609,7 +637,8 @@ struct {
 } active_l7_responses SEC(".maps");
 
 struct write_args {
-    __u64 fd;  // only fd needed
+    // only fd needed
+    __u64 fd;
 };
 
 struct {
@@ -630,7 +659,8 @@ int trace_ss_enter_read(__u64 id, __u32 pid, __u64 fd) {
     resp_key.pid = pid;
     resp_key.fd = fd;
 
-    struct l7_response resp = {};  // not use things like request heap, since it's very light
+    // not use things like request heap, since it's very light
+    struct l7_response resp = {};
     resp.ns = read_ns;
     resp.tgid_recv = read_tgid;
 
@@ -768,7 +798,7 @@ int sys_enter_sendto(struct trace_event_raw_sys_enter_rw__stub* ctx) {
 
 // exit write-like syscalls
 SEC("tracepoint/syscalls/sys_exit_write")
-int sys_exit_write(struct trace_event_raw_sys_exit_rw__stub* ctx) {
+int sys_exit_write(struct trace_event_raw_sys_exit__stub* ctx) {
     __u64 id = bpf_get_current_pid_tgid();
     __u32 pid = id >> 32;
 
@@ -777,7 +807,7 @@ int sys_exit_write(struct trace_event_raw_sys_exit_rw__stub* ctx) {
 }
 
 SEC("tracepoint/syscalls/sys_exit_writev")
-int sys_exit_writev(struct trace_event_raw_sys_exit_rw__stub* ctx) {
+int sys_exit_writev(struct trace_event_raw_sys_exit__stub* ctx) {
     __u64 id = bpf_get_current_pid_tgid();
     __u32 pid = id >> 32;
 
@@ -786,7 +816,7 @@ int sys_exit_writev(struct trace_event_raw_sys_exit_rw__stub* ctx) {
 }
 
 SEC("tracepoint/syscalls/sys_exit_sendmsg")
-int sys_exit_sendmsg(struct trace_event_raw_sys_exit_rw__stub* ctx) {
+int sys_exit_sendmsg(struct trace_event_raw_sys_exit__stub* ctx) {
     __u64 id = bpf_get_current_pid_tgid();
     __u32 pid = id >> 32;
 
@@ -795,7 +825,7 @@ int sys_exit_sendmsg(struct trace_event_raw_sys_exit_rw__stub* ctx) {
 }
 
 SEC("tracepoint/syscalls/sys_exit_sendto")
-int sys_exit_sendto(struct trace_event_raw_sys_exit_rw__stub* ctx) {
+int sys_exit_sendto(struct trace_event_raw_sys_exit__stub* ctx) {
     __u64 id = bpf_get_current_pid_tgid();
     __u32 pid = id >> 32;
 
@@ -803,7 +833,7 @@ int sys_exit_sendto(struct trace_event_raw_sys_exit_rw__stub* ctx) {
     return 0;
 }
 
-// todo temporarily not include sendmmsg
+// todo supports `sendmmsg`
 
 // enter read-like syscalls
 SEC("tracepoint/syscalls/sys_enter_read")
@@ -844,28 +874,28 @@ int sys_enter_recvfrom(struct trace_event_raw_sys_enter_rw__stub* ctx) {
 
 // exit read-like syscalls
 SEC("tracepoint/syscalls/sys_exit_read")
-int sys_exit_read(struct trace_event_raw_sys_exit_rw__stub* ctx) {
+int sys_exit_read(struct trace_event_raw_sys_exit__stub* ctx) {
     __u64 pid_tgid = bpf_get_current_pid_tgid();
     __u32 pid = pid_tgid >> 32;
     return trace_exit_read(ctx, pid_tgid, pid, 0, ctx->ret);
 }
 
 SEC("tracepoint/syscalls/sys_exit_readv")
-int sys_exit_readv(struct trace_event_raw_sys_exit_rw__stub* ctx) {
+int sys_exit_readv(struct trace_event_raw_sys_exit__stub* ctx) {
     __u64 pid_tgid = bpf_get_current_pid_tgid();
     __u32 pid = pid_tgid >> 32;
     return trace_exit_read(ctx, pid_tgid, pid, 0, ctx->ret);
 }
 
 SEC("tracepoint/syscalls/sys_exit_recvmsg")
-int sys_exit_recvmsg(struct trace_event_raw_sys_exit_rw__stub* ctx) {
+int sys_exit_recvmsg(struct trace_event_raw_sys_exit__stub* ctx) {
     __u64 pid_tgid = bpf_get_current_pid_tgid();
     __u32 pid = pid_tgid >> 32;
     return trace_exit_read(ctx, pid_tgid, pid, 0, ctx->ret);
 }
 
 SEC("tracepoint/syscalls/sys_exit_recvfrom")
-int sys_exit_recvfrom(struct trace_event_raw_sys_exit_rw__stub* ctx) {
+int sys_exit_recvfrom(struct trace_event_raw_sys_exit__stub* ctx) {
     __u64 pid_tgid = bpf_get_current_pid_tgid();
     __u32 pid = pid_tgid >> 32;
     return trace_exit_read(ctx, pid_tgid, pid, 0, ctx->ret);

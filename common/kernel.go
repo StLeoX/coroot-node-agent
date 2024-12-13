@@ -1,19 +1,24 @@
 package common
 
 import (
-	"k8s.io/klog/v2"
-	"regexp"
-	"syscall"
-	"time"
-	"unsafe"
+	"fmt"
 )
 
 var (
-	kernelVersionRe = regexp.MustCompile(`^(\d+\.\d+)`)
+	kernelVersion Version
 )
 
-func KernelMajorMinor(version string) string {
-	return kernelVersionRe.FindString(version)
+func SetKernelVersion(version string) error {
+	v, err := VersionFromString(version)
+	if err != nil || v.Major == 0 {
+		return fmt.Errorf("invalid kernel version: %s", version)
+	}
+	kernelVersion = v
+	return nil
+}
+
+func GetKernelVersion() Version {
+	return kernelVersion
 }
 
 // KernelMonotonicTime gives duration since kernel boot.
