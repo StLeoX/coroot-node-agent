@@ -151,12 +151,11 @@ func (s Status) Error() bool {
 	return s == StatusFailed
 }
 
-// Request stands for original L7 Flow.
-type Request struct {
-	ID       uint32 // todo 还没有统一成 16 位的 SpanID。比如 http 可能是 X-Request-Id。目前 TracingAlgo 最好不用使用。
-	Protocol Protocol
-	Method   Method
-	Status   Status
-	Duration time.Duration // nanoseconds
-	Payload  []byte
+type RequestData struct {
+	RequestId uint32 // todo 还没有统一成 16 位的 SpanID。比如 http 可能是 X-Request-Id。目前 TracingAlgo 最好不用使用。
+	Protocol  Protocol
+	Method    Method
+	Status    Status
+	Duration  time.Duration // nanoseconds
+	Payload   []byte
 }

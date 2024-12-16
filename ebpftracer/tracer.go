@@ -264,7 +264,7 @@ func (t *Tracer) ebpf(ch chan<- Event) error {
 			switch programSpec.Name {
 			case "sys_enter_writev", "sys_enter_write", "sys_enter_sendto", "sys_enter_sendmsg", "sys_enter_sendmmsg":
 				continue
-			case "sys_exit_write", "sys_exit_writev", "sys_exit_sendto", "sys_exit_sendmsg":
+			case "sys_exit_writev", "sys_exit_write", "sys_exit_sendto", "sys_exit_sendmsg":
 				continue
 			case "sys_enter_read", "sys_enter_readv", "sys_enter_recvfrom", "sys_enter_recvmsg":
 				continue
@@ -305,15 +305,15 @@ func (t EventType) String() string {
 	case EventTypeProcessExit:
 		return "process-exit"
 	case EventTypeConnectionOpen:
-		return "tcp-connect-open"
+		return "connection-open"
 	case EventTypeConnectionClose:
-		return "tcp-connect-close"
+		return "connection-close"
 	case EventTypeConnectionError:
-		return "tcp-connect-error"
+		return "connection-error"
 	case EventTypeListenOpen:
-		return "tcp-listen-open"
+		return "listen-open"
 	case EventTypeListenClose:
-		return "tcp-listen-close"
+		return "listen-close"
 	case EventTypeFileOpen:
 		return "file-open"
 	case EventTypeTCPRetransmit:
@@ -321,15 +321,17 @@ func (t EventType) String() string {
 	case EventTypeL7Request:
 		return "l7-request"
 	}
-	return "type-unknown-" + strconv.Itoa(int(t))
+	return "unknown: " + strconv.Itoa(int(t))
 }
 
 func (t EventReason) String() string {
 	switch t {
+	case EventReasonNone:
+		return "none"
 	case EventReasonOOMKill:
 		return "oom-kill"
 	}
-	return "reason-unknown-" + strconv.Itoa(int(t))
+	return "unknown: " + strconv.Itoa(int(t))
 }
 
 type procEvent struct {
@@ -430,11 +432,11 @@ func runEventsReader(name string, r *perf.Reader, ch chan<- Event, typ perfMapTy
 			// `Bytes` holds the unread portion of the buffer
 			payload := reader.Bytes()
 			req := &l7.RequestData{
-				Protocol:    l7.Protocol(v.Protocol),
-				Status:      l7.Status(v.Status),
-				Duration:    time.Duration(v.Duration),
-				Method:      l7.Method(v.Method),
-				StatementId: v.StatementId,
+				Protocol:  l7.Protocol(v.Protocol),
+				Status:    l7.Status(v.Status),
+				Duration:  time.Duration(v.Duration),
+				Method:    l7.Method(v.Method),
+				RequestId: v.StatementId,
 			}
 			switch {
 			case v.PayloadSize == 0:
@@ -449,23 +451,24 @@ func runEventsReader(name string, r *perf.Reader, ch chan<- Event, typ perfMapTy
 				TgidReqCs:  v.TgidWrite,
 				TgidRespCs: v.TgidRead,
 				Fd:         v.Fd,
+				Timestamp:  v.ConnectionTimestamp,
 				Duration:   time.Duration(v.Duration),
 				L7Request:  req}
 		case perfMapTypeL7SSEvents:
-			l7EventSS := &l7EventSS{}
-			reader := bytes.NewBuffer(record.RawSample)
-			if err := binary.Read(reader, binary.LittleEndian, l7EventSS); err != nil {
+			v := &l7EventSS{}
+			reader := bytes.NewBuffer(rec.RawSample)
+			if err := binary.Read(reader, binary.LittleEndian, v); err != nil {
 				klog.Warningln("failed to read from l7_events_ss PerfMap: ", err)
 				continue
 			}
 			event = Event{
 				Type:            EventTypeL7Response,
-				Pid:             l7EventSS.Pid,
-				TgidReqSs:       l7EventSS.TgidRead,
-				TgidRespSs:      l7EventSS.TgidWrite,
-				Fd:              l7EventSS.Fd,
-				KernelTimestamp: l7EventSS.Timestamp,
-				Duration:        time.Duration(l7EventSS.Duration),
+				Pid:             v.Pid,
+				TgidReqSs:       v.TgidRead,
+				TgidRespSs:      v.TgidWrite,
+				Fd:              v.Fd,
+				KernelTimestamp: v.Timestamp,
+				Duration:        time.Duration(v.Duration),
 			}
 		case perfMapTypeFileEvents:
 			v := &fileEvent{}
@@ -528,6 +531,7 @@ func ipPort(ip [16]byte, port uint16) netaddr.IPPort {
 	return netaddr.IPPortFrom(i, port)
 }
 
+// Supports extra padding for tracepoint arguments (since 5.14 kernel, there is a flag)
 func isCtxExtraPaddingRequired(traceFsPath string) bool {
 	f, err := os.Open(path.Join(traceFsPath, "events/task/task_newtask/format"))
 	if err != nil {

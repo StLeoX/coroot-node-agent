@@ -4,9 +4,11 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/coroot/coroot-node-agent/common"
+	"github.com/coroot/coroot-node-agent/ebpftracer"
 	"github.com/coroot/coroot-node-agent/ebpftracer/l7"
 	"github.com/coroot/coroot-node-agent/flags"
 	"go.opentelemetry.io/otel/attribute"
@@ -18,6 +20,10 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.18.0"
 	"go.opentelemetry.io/otel/trace"
 	"k8s.io/klog/v2"
+)
+
+const (
+	MemcacheDBItemKeyName attribute.Key = "dt.memcached.item"
 )
 
 var (
@@ -81,74 +87,66 @@ func GetContainerTracer(containerId string) *Tracer {
 	return &Tracer{otel: provider.Tracer("coroot-node-agent", trace.WithInstrumentationVersion(agentVersion))}
 }
 
-func (t *Tracer) NewTrace(destination common.HostPort) *Trace {
-	return &Trace{tracer: t, destination: destination, commonAttrs: []attribute.KeyValue{
-		semconv.NetPeerName(destination.Host()),
-		semconv.NetPeerPort(int(destination.Port())),
-	}}
-}
-
-// SpanBuilder manages resource attributes. Others manage span attributes.
-type SpanBuilder struct {
-	tracer      *Tracer
-	containerId string
-	destination netaddr.IPPort
-	startTime   time.Time
-	commonAttrs []attribute.KeyValue
-}
-
-func NewSpanBuilder(containerId string, source, destination netaddr.IPPort, startTime time.Time, raw *ebpftracer.Event) *SpanBuilder {
-	if tracer == nil {
-		return nil
-	}
-
-	return &SpanBuilder{containerId: containerId,
+// NewTrace creates a new Trace, actually it's a single span.
+func (t *Tracer) NewTrace(source, destination common.HostPort, startTime time.Time, raw *ebpftracer.Event) *Trace {
+	return &Trace{tracer: t,
 		destination: destination,
 		startTime:   startTime,
 		commonAttrs: []attribute.KeyValue{
-			semconv.NetHostName(source.IP().String()),
+			semconv.NetHostName(source.Host()),
 			semconv.NetHostPort(int(source.Port())),
-			semconv.NetPeerName(destination.IP().String()),
+			semconv.NetPeerName(destination.Host()),
 			semconv.NetPeerPort(int(destination.Port())),
 			attribute.String("tgid_req_cs", strconv.FormatUint(raw.TgidReqCs, 10)),
 			attribute.String("tgid_resp_cs", strconv.FormatUint(raw.TgidRespCs, 10)),
 		}}
 }
 
-func (b *SpanBuilder) createSpan(name string, duration time.Duration, error bool, attrs ...attribute.KeyValue) {
-	// todo 不管之前如何滥用时间字段，这里完全在使用 process time，这一点可以使用 event time，因为中间会存在 agent 处理耗时。
-	end := time.Now()
-	start := end.Add(-duration)
-	_, span := b.tracer.otel.Start(context.Background(), name, trace.WithTimestamp(start), trace.WithSpanKind(trace.SpanKindClient))
+// Trace manages Span's resource attributes. Others manage Span's span attributes.
+type Trace struct {
+	tracer      *Tracer
+	destination common.HostPort
+	startTime   time.Time
+	commonAttrs []attribute.KeyValue
+}
+
+func (t *Trace) createSpan(name string, duration time.Duration, error bool, attrs ...attribute.KeyValue) {
+	if t.tracer.otel == nil {
+		klog.Warning("Tracer unavailable.")
+		return
+	}
+	startTime := t.startTime
+	endTime := startTime.Add(duration)
+	_, span := t.tracer.otel.Start(context.Background(), name, trace.WithTimestamp(startTime), trace.WithSpanKind(trace.SpanKindClient))
 	span.SetAttributes(attrs...)
-	span.SetAttributes(b.commonAttrs...)
+	span.SetAttributes(t.commonAttrs...)
 	if error {
 		span.SetStatus(codes.Error, "")
 	} else {
 		span.SetStatus(codes.Ok, "")
 	}
-	span.End(trace.WithTimestamp(end))
+	span.End(trace.WithTimestamp(endTime))
 }
 
-func (b *SpanBuilder) HttpRequest(method, uri, path string, status l7.Status, duration time.Duration) {
-	if b == nil || method == "" {
+func (t *Trace) HttpRequest(method, uri, path string, status l7.Status, duration time.Duration) {
+	if t == nil || method == "" {
 		return
 	}
-	b.createSpan(fmt.Sprintf("%s %s", method, path),
+	t.createSpan(fmt.Sprintf("%s %s", method, path),
 		duration,
 		status >= 400,
-		semconv.HTTPURL(fmt.Sprintf("http://%s%s", b.destination.String(), uri)),
+		semconv.HTTPURL(fmt.Sprintf("http://%s%s", t.destination.String(), uri)),
 		semconv.HTTPMethod(method),
 		semconv.HTTPStatusCode(int(status)),
 	)
 }
 
-func (b *SpanBuilder) Http2Request(method, path, scheme string, status l7.Status, duration time.Duration) {
-	if b == nil {
+func (t *Trace) Http2Request(method, path, scheme string, status l7.Status, duration time.Duration) {
+	if t == nil {
 		return
 	}
 	if method == "" {
-		method = "UNKNOWN"
+		method = "unknown"
 	}
 	if path == "" {
 		path = "/unknown"
@@ -156,74 +154,73 @@ func (b *SpanBuilder) Http2Request(method, path, scheme string, status l7.Status
 	if scheme == "" {
 		scheme = "unknown"
 	}
-	b.createSpan(fmt.Sprintf("%s %s", method, path),
+	t.createSpan(fmt.Sprintf("%s %s", method, path),
 		duration,
-		status > 400,
-		semconv.HTTPURL(fmt.Sprintf("%s://%s%s", scheme, b.destination.String(), path)),
+		status >= 400,
+		semconv.HTTPURL(fmt.Sprintf("%s://%s%s", scheme, t.destination.String(), path)),
 		semconv.HTTPMethod(method),
 		semconv.HTTPStatusCode(int(status)),
 	)
 }
 
-func (b *SpanBuilder) PostgresQuery(query string, error bool, duration time.Duration) {
-	if b == nil || query == "" {
+func (t *Trace) PostgresQuery(query string, error bool, duration time.Duration) {
+	if t == nil || query == "" {
 		return
 	}
-	b.createSpan("query", duration, error,
+	t.createSpan("query", duration, error,
 		semconv.DBSystemPostgreSQL,
 		// todo 轻解析 SQL 知道 CRUD 操作类型。
 		semconv.DBStatement(query),
 	)
 }
 
-func (b *SpanBuilder) MysqlQuery(query string, error bool, duration time.Duration) {
-	if b == nil || query == "" {
+func (t *Trace) MysqlQuery(query string, error bool, duration time.Duration) {
+	if t == nil || query == "" {
 		return
 	}
-	b.createSpan("query", duration, error,
+	t.createSpan("query", duration, error,
 		semconv.DBSystemMySQL,
 		// todo 轻解析 SQL 知道 CRUD 操作类型。
 		semconv.DBStatement(query),
 	)
 }
 
-func (b *SpanBuilder) MongoQuery(query string, error bool, duration time.Duration) {
-	if b == nil || query == "" {
+func (t *Trace) MongoQuery(query string, error bool, duration time.Duration) {
+	if t == nil || query == "" {
 		return
 	}
-	b.createSpan("query", duration, error,
+	t.createSpan("query", duration, error,
 		semconv.DBSystemMongoDB,
 		// todo 轻解析 SQL 知道 CRUD 操作类型。
 		semconv.DBStatement(query),
 	)
 }
 
-func (b *SpanBuilder) MemcachedQuery(cmd string, items []string, error bool, duration time.Duration) {
-	if b == nil || cmd == "" {
+func (t *Trace) MemcachedQuery(cmd string, items []string, error bool, duration time.Duration) {
+	if t == nil || cmd == "" {
 		return
 	}
 	attrs := []attribute.KeyValue{
 		semconv.DBSystemMemcached,
 		semconv.DBOperation(cmd),
 	}
-	var MemcacheDBItemKeyName attribute.Key = "db.memcached.item"
 	if len(items) == 1 {
 		attrs = append(attrs, MemcacheDBItemKeyName.String(items[0]))
 	} else if len(items) > 1 {
 		attrs = append(attrs, MemcacheDBItemKeyName.StringSlice(items))
 	}
-	b.createSpan(cmd, duration, error, attrs...)
+	t.createSpan(cmd, duration, error, attrs...)
 }
 
-func (b *SpanBuilder) RedisQuery(cmd, args string, error bool, duration time.Duration) {
-	if b == nil || cmd == "" {
+func (t *Trace) RedisQuery(cmd, args string, error bool, duration time.Duration) {
+	if t == nil || cmd == "" {
 		return
 	}
 	statement := cmd
 	if args != "" {
 		statement += " " + args
 	}
-	b.createSpan(cmd, duration, error,
+	t.createSpan(cmd, duration, error,
 		semconv.DBSystemRedis,
 		semconv.DBOperation(cmd),
 		semconv.DBStatement(statement),

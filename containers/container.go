@@ -73,7 +73,7 @@ type ConnectionKey struct {
 }
 
 type ActiveConnection struct {
-	Src        netaddr.IPPort
+	Src            common.HostPort
 	DestinationKey common.DestinationKey
 	Pid            uint32
 	Fd             uint64
@@ -552,7 +552,7 @@ func (c *Container) onConnectionOpen(pid uint32, fd uint64, src, dst, actualDst 
 		stats.Count++
 		stats.TotalTime += duration
 		connection := &ActiveConnection{
-			Src:        src,
+			Src:            common.HostPortFromIPPort(src),
 			DestinationKey: key,
 			Pid:            pid,
 			Fd:             fd,
@@ -564,7 +564,7 @@ func (c *Container) onConnectionOpen(pid uint32, fd uint64, src, dst, actualDst 
 	c.lastConnectionAttempts[key.Destination()] = time.Now()
 }
 
-// getRealTime calculates real time based on kernel time
+// getRealTime calculates real time based on kernel time.
 func getRealTime(kernelTimestamp uint64) time.Time {
 	processKernelTime := common.KernelMonotonicTime()
 	processRealTime := time.Now()
@@ -573,8 +573,8 @@ func getRealTime(kernelTimestamp uint64) time.Time {
 	return eventRealTime
 }
 
+// addrBelongsToWorld judges whether the host requested an external site.
 func (c *Container) addrBelongsToWorld(addr netaddr.IPPort) bool {
-	// 判断主机是否请求某个外部站点。
 	if !addr.IP().IsPrivate() && (addr.Port() == 443 || addr.Port() == 80) {
 		return true
 	}
@@ -685,17 +685,17 @@ func (c *Container) onL7Request(pid uint32, fd uint64, connectionTimestamp uint6
 		return nil
 	}
 
-	stats := c.l7Stats.get(r.Protocol, conn.Dest, conn.ActualDest)
+	stats := c.l7Stats.get(r.Protocol, conn.DestinationKey)
 
 	spanStartTime := getRealTime(raw.KernelTimestamp)
-	spanBuilder := tracing.NewSpanBuilder(string(c.id), conn.Src, conn.DestinationKey.ActualDestinationIfKnown(), spanStartTime, raw)
+	trace := c.tracer.NewTrace(conn.Src, conn.DestinationKey.ActualDestinationIfKnown(), spanStartTime, raw)
 
 	switch r.Protocol {
-	// sort `case` by protocol's statistics distribution
+	// Sorted by protocol's statistics distribution, most likely HTTP.
 	case l7.ProtocolHTTP:
 		stats.observe(r.Status.Http(), "", r.Duration)
 		method, uri, path := l7.ParseHttp(r.Payload)
-		spanBuilder.HttpRequest(method, uri, path, r.Status, r.Duration)
+		trace.HttpRequest(method, uri, path, r.Status, r.Duration)
 	case l7.ProtocolHTTP2:
 		if conn.http2Parser == nil {
 			conn.http2Parser = l7.NewHttp2Parser()
@@ -703,7 +703,7 @@ func (c *Container) onL7Request(pid uint32, fd uint64, connectionTimestamp uint6
 		requests := conn.http2Parser.Parse(r.Method, r.Payload, uint64(r.Duration))
 		for _, req := range requests {
 			stats.observe(req.Status.Http(), "", req.Duration)
-			spanBuilder.Http2Request(req.Method, req.Path, req.Scheme, req.Status, req.Duration)
+			trace.Http2Request(req.Method, req.Path, req.Scheme, req.Status, req.Duration)
 		}
 	case l7.ProtocolPostgres:
 		if r.Method != l7.MethodStatementClose {
@@ -713,7 +713,7 @@ func (c *Container) onL7Request(pid uint32, fd uint64, connectionTimestamp uint6
 			conn.postgresParser = l7.NewPostgresParser()
 		}
 		query := conn.postgresParser.Parse(r.Payload)
-		spanBuilder.PostgresQuery(query, r.Status.Error(), r.Duration)
+		trace.PostgresQuery(query, r.Status.Error(), r.Duration)
 	case l7.ProtocolMysql:
 		if r.Method != l7.MethodStatementClose {
 			stats.observe(r.Status.String(), "", r.Duration)
@@ -721,20 +721,20 @@ func (c *Container) onL7Request(pid uint32, fd uint64, connectionTimestamp uint6
 		if conn.mysqlParser == nil {
 			conn.mysqlParser = l7.NewMysqlParser()
 		}
-		query := conn.mysqlParser.Parse(r.Payload, r.ID)
-		spanBuilder.MysqlQuery(query, r.Status.Error(), r.Duration)
+		query := conn.mysqlParser.Parse(r.Payload, r.RequestId)
+		trace.MysqlQuery(query, r.Status.Error(), r.Duration)
 	case l7.ProtocolMemcached:
 		stats.observe(r.Status.String(), "", r.Duration)
 		cmd, items := l7.ParseMemcached(r.Payload)
-		spanBuilder.MemcachedQuery(cmd, items, r.Status.Error(), r.Duration)
+		trace.MemcachedQuery(cmd, items, r.Status.Error(), r.Duration)
 	case l7.ProtocolRedis:
 		stats.observe(r.Status.String(), "", r.Duration)
 		cmd, args := l7.ParseRedis(r.Payload)
-		spanBuilder.RedisQuery(cmd, args, r.Status.Error(), r.Duration)
+		trace.RedisQuery(cmd, args, r.Status.Error(), r.Duration)
 	case l7.ProtocolMongo:
 		stats.observe(r.Status.String(), "", r.Duration)
 		query := l7.ParseMongo(r.Payload)
-		spanBuilder.MongoQuery(query, r.Status.Error(), r.Duration)
+		trace.MongoQuery(query, r.Status.Error(), r.Duration)
 	case l7.ProtocolKafka, l7.ProtocolCassandra:
 		stats.observe(r.Status.String(), "", r.Duration)
 	case l7.ProtocolRabbitmq, l7.ProtocolNats:
