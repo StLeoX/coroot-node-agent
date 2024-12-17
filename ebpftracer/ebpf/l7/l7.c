@@ -61,8 +61,10 @@
 
 struct l7_event {
     __u64 fd;
-    // connection timestamp instead of the span start timestamp, actually unused from the GoLang part
+    // connection establishing timestamp
     __u64 connection_timestamp;
+    // (kernel) timestamp when writing request, also the span start timestamp
+    __u64 timestamp;
     __u32 pid;
     // tgid who sends the request
     __u64 tgid_write;
@@ -118,7 +120,7 @@ struct l7_request_key {
 };
 
 struct l7_request {
-    // timestamp when sends the request
+    // (kernel) timestamp when sending the request
     __u64 ns;
     // tgid who sends the request
     __u64 tgid_send;
@@ -287,6 +289,7 @@ int trace_enter_write(void *ctx, __u64 fd, __u16 is_tls, char *buf, __u64 size, 
             }
             e->protocol = PROTOCOL_POSTGRES;
             e->method = METHOD_STATEMENT_CLOSE;
+            e->timestamp = write_ns;
             e->tgid_write = write_tgid;
             e->tgid_read = write_tgid;  // todo
             e->payload_size = size;
@@ -308,6 +311,7 @@ int trace_enter_write(void *ctx, __u64 fd, __u16 is_tls, char *buf, __u64 size, 
             }
             e->protocol = PROTOCOL_MYSQL;
             e->method = METHOD_STATEMENT_CLOSE;
+            e->timestamp = write_ns;
             e->tgid_write = write_tgid;
             e->tgid_read = write_tgid;  // todo
             e->payload_size = size;
@@ -325,6 +329,7 @@ int trace_enter_write(void *ctx, __u64 fd, __u16 is_tls, char *buf, __u64 size, 
         }
         e->protocol = PROTOCOL_RABBITMQ;
         e->method = METHOD_PRODUCE;
+        e->timestamp = write_ns;
         e->tgid_write = write_tgid;
         e->tgid_read = write_tgid;  // todo
         send_event(ctx, e, cid, conn);
@@ -336,6 +341,7 @@ int trace_enter_write(void *ctx, __u64 fd, __u16 is_tls, char *buf, __u64 size, 
         }
         e->protocol = PROTOCOL_NATS;
         e->method = METHOD_PRODUCE;
+        e->timestamp = write_ns;
         e->tgid_write = write_tgid;
         e->tgid_read = write_tgid;  // todo
         send_event(ctx, e, cid, conn);
@@ -356,8 +362,9 @@ int trace_enter_write(void *ctx, __u64 fd, __u16 is_tls, char *buf, __u64 size, 
         }
         e->protocol = PROTOCOL_HTTP2;
         e->method = METHOD_HTTP2_CLIENT_FRAMES;
-        // todo client-side tgid for writing http2
-        e->duration = write_ns;
+        e->timestamp = write_ns;
+        // e->duration = 0;
+        // todo tgid
         e->payload_size = size;
         COPY_PAYLOAD(e->payload, size, payload);
         send_event(ctx, e, cid, conn);
@@ -583,9 +590,11 @@ int trace_exit_read(void *ctx, __u64 id, __u32 pid, __u16 is_tls, long int ret) 
         return 0;
     }
 
+    e->timestamp = req->ns;
+    e->duration = read_ns - req->ns;
     e->tgid_write = req->tgid_send;
     e->tgid_read = read_tgid;
-    e->duration = read_ns - req->ns;
+
     send_event(ctx, e, cid, conn);
     return 0;
 }
@@ -623,7 +632,7 @@ struct l7_response_key {
 };
 
 struct l7_response {
-    // (kernel) timestamp when receives the request
+    // (kernel) timestamp when receiving the request
     __u64 ns;
     // tgid who receives the request
     __u64 tgid_recv;

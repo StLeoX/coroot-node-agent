@@ -566,11 +566,20 @@ func (c *Container) onConnectionOpen(pid uint32, fd uint64, src, dst, actualDst 
 
 // getRealTime calculates real time based on kernel time.
 func getRealTime(kernelTimestamp uint64) time.Time {
+	// kernel timestamp unavailable, turn to near time?
+	if kernelTimestamp == 0 {
+		return getNearTime()
+	}
+
 	processKernelTime := common.KernelMonotonicTime()
 	processRealTime := time.Now()
 	eventKernelTime := time.Duration(kernelTimestamp) * time.Nanosecond
 	eventRealTime := processRealTime.Add(-processKernelTime).Add(eventKernelTime)
 	return eventRealTime
+}
+
+func getNearTime() time.Time {
+	return time.Now()
 }
 
 // addrBelongsToWorld judges whether the host requested an external site.

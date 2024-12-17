@@ -76,7 +76,7 @@ type Event struct {
 	Fd            uint64
 	// nanoseconds, it may be overwrite by `time.Now()`
 	Timestamp uint64
-	// nanoseconds, it usually comes from `bpf_ktime_get_ns` directly
+	// nanoseconds, it comes from `bpf_ktime_get_ns` directly
 	KernelTimestamp uint64
 	// nanoseconds
 	Duration     time.Duration
@@ -370,6 +370,7 @@ type fileEvent struct {
 type l7Event struct {
 	Fd                  uint64
 	ConnectionTimestamp uint64
+	Timestamp           uint64
 	Pid                 uint32
 	TgidWrite           uint64
 	TgidRead            uint64
@@ -446,14 +447,15 @@ func runEventsReader(name string, r *perf.Reader, ch chan<- Event, typ perfMapTy
 				req.Payload = payload[:v.PayloadSize]
 			}
 			event = Event{
-				Type:       EventTypeL7Request,
-				Pid:        v.Pid,
-				TgidReqCs:  v.TgidWrite,
-				TgidRespCs: v.TgidRead,
-				Fd:         v.Fd,
-				Timestamp:  v.ConnectionTimestamp,
-				Duration:   time.Duration(v.Duration),
-				L7Request:  req}
+				Type:            EventTypeL7Request,
+				Pid:             v.Pid,
+				TgidReqCs:       v.TgidWrite,
+				TgidRespCs:      v.TgidRead,
+				Fd:              v.Fd,
+				Timestamp:       v.ConnectionTimestamp,
+				KernelTimestamp: v.Timestamp,
+				Duration:        time.Duration(v.Duration),
+				L7Request:       req}
 		case perfMapTypeL7SSEvents:
 			v := &l7EventSS{}
 			reader := bytes.NewBuffer(rec.RawSample)
