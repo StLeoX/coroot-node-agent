@@ -6,8 +6,7 @@ COPY go.sum .
 RUN export GOPROXY='https://goproxy.cn' && go mod download
 COPY . .
 ARG VERSION=latest
-RUN CGO_ENABLED=1 go build -mod=readonly -ldflags "-X main.version=$VERSION" -o coroot-node-agent .
-
+RUN export NODE_AGENT_VERSION=$VERSION && make go-build
 
 FROM debian:bullseye
 RUN apt update && apt install -y ca-certificates

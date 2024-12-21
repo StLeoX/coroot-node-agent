@@ -2,11 +2,12 @@ name: Release
 
 on:
   release:
-    types: [created]
+    types: [ created ]
 
 env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  REGISTRY: registry.cn-beijing.aliyuncs.com
+  IMAGE_NAME: obser/coroot-node-agent
+  GITHUB_TOKEN: ${{ secrets.COROOT_TOKEN }}
 
 jobs:
   build:
@@ -18,7 +19,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
 
       - uses: docker/login-action@v3
@@ -39,7 +39,7 @@ jobs:
       - uses: docker/build-push-action@v5
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -47,14 +47,9 @@ jobs:
             VERSION=${{ steps.meta.outputs.version }}
 
       - name: extract amd64 binary from the image
-        run: | 
+        run: |
           docker create --platform linux/amd64 --name amd64 ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }} && 
           docker cp amd64:/usr/bin/coroot-node-agent /tmp/coroot-node-agent-amd64
-
-      - name: extract arm64 binary from the image
-        run: |
-          docker create --platform linux/arm64 --name arm64 ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }} &&
-          docker cp arm64:/usr/bin/coroot-node-agent /tmp/coroot-node-agent-arm64
 
       - name: upload amd64 binary
         uses: actions/upload-release-asset@v1
@@ -66,19 +61,9 @@ jobs:
           asset_name: coroot-node-agent-amd64
           asset_content_type: application/octet-stream
 
-      - name: upload arm64 binary
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ github.event.release.upload_url }}
-          asset_path: /tmp/coroot-node-agent-arm64
-          asset_name: coroot-node-agent-arm64
-          asset_content_type: application/octet-stream
-
       - uses: actions/github-script@v7
         env:
-            RELEASE_ID: ${{ github.event.release.id }}
+          RELEASE_ID: ${{ github.event.release.id }}
         with:
           script: |
             const { RELEASE_ID } = process.env
