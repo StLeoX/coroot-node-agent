@@ -58,7 +58,7 @@ func NewSSEventBatcher(limit int, timeout time.Duration, client *ch.Client) *SSE
 				return
 			case <-ticker.C:
 				b.addLock.Lock()
-				b.save()
+				// b.save()
 				b.addLock.Unlock()
 			}
 		}
@@ -81,13 +81,13 @@ func (b *SSEventBatcher) Add(startTime time.Time, duration time.Duration, contai
 	if b.Timestamp.Rows() < b.limit {
 		return
 	}
-	b.save()
+	// b.save()
 }
 
 func (b *SSEventBatcher) Close() {
 	b.done <- struct{}{}
 	b.addLock.Lock()
-	b.save()
+	// b.save()
 	b.addLock.Unlock()
 }
 
@@ -104,7 +104,7 @@ func (b *SSEventBatcher) save() {
 		{Name: "TgidWrite", Data: b.TgidWrite},
 		{Name: "StatementId", Data: b.StatementID},
 	}
-	query := ch.Query{Body: input.Into("l7_events_ss"), Input: input}
+	query := ch.Query{Body: input.Into("ebpf_ss_events"), Input: input}
 
 	if b.client == nil || b.client.IsClosed() {
 		var err error
