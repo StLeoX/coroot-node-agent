@@ -2,10 +2,11 @@ package common
 
 import (
 	"fmt"
-	"k8s.io/klog/v2"
 	"syscall"
 	"time"
 	"unsafe"
+
+	"k8s.io/klog/v2"
 )
 
 var (

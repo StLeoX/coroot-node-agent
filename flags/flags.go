@@ -35,14 +35,11 @@ var (
 	TracesEndpoint     = kingpin.Flag("traces-endpoint", "The URL of the endpoint to send traces to").Envar("TRACES_ENDPOINT").URL()
 	LogsEndpoint       = kingpin.Flag("logs-endpoint", "The URL of the endpoint to send logs to").Envar("LOGS_ENDPOINT").URL()
 	ProfilesEndpoint   = kingpin.Flag("profiles-endpoint", "The URL of the endpoint to send profiles to").Envar("PROFILES_ENDPOINT").URL()
+	EventsEndpoint     = kingpin.Flag("events-endpoint", "The URL of the endpoint to send events to").Envar("EVENTS_ENDPOINT").URL()
 	InsecureSkipVerify = kingpin.Flag("insecure-skip-verify", "whether to skip verifying the certificate or not").Envar("INSECURE_SKIP_VERIFY").Default("false").Bool()
 
 	ScrapeInterval = kingpin.Flag("scrape-interval", "How often to gather metrics from the agent").Default("15s").Envar("SCRAPE_INTERVAL").Duration()
 	WalDir         = kingpin.Flag("wal-dir", "Path to where the agent stores data (e.g. the metrics Write-Ahead Log)").Default("/tmp/coroot-node-agent").Envar("WAL_DIR").String()
-
-	ClickhouseEndpoint = kingpin.Flag("clickhouse-endpoint", "Clickhouse endpoint").Envar("CLICKHOUSE_ENDPOINT").Default("default").String()
-	ClickhouseUser     = kingpin.Flag("clickhouse-user", "Clickhouse user").Envar("CLICKHOUSE_USER").Default("default").String()
-	ClickhousePassword = kingpin.Flag("clickhouse-password", "Clickhouse password").Envar("CLICKHOUSE_PASSWORD").String()
 )
 
 func GetString(fl *string) string {
@@ -73,6 +70,9 @@ func init() {
 		}
 		if *ProfilesEndpoint == nil {
 			*ProfilesEndpoint = u.JoinPath("/v1/profiles")
+		}
+		if *EventsEndpoint == nil {
+			*EventsEndpoint = u.JoinPath("/v1/events")
 		}
 	}
 

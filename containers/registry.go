@@ -15,7 +15,6 @@ import (
 	"github.com/coroot/coroot-node-agent/ebpftracer"
 	"github.com/coroot/coroot-node-agent/flags"
 	"github.com/coroot/coroot-node-agent/proc"
-	"github.com/coroot/coroot-node-agent/tracing"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/vishvananda/netns"
 	"inet.af/netaddr"
@@ -56,8 +55,6 @@ type Registry struct {
 	trafficStatsLastUpdated time.Time
 	trafficStatsLock        sync.Mutex
 	trafficStatsUpdateCh    chan *TrafficStatsUpdate
-
-	sseBatcher *tracing.SSEventBatcher
 }
 
 func NewRegistry(reg prometheus.Registerer, processInfoCh chan<- ProcessInfo) (*Registry, error) {
@@ -98,12 +95,6 @@ func NewRegistry(reg prometheus.Registerer, processInfoCh chan<- ProcessInfo) (*
 		klog.Warningln(err)
 	}
 
-	// New chClient
-	chClient, err := common.NewChClient()
-	if err != nil {
-		return nil, err
-	}
-
 	r := &Registry{
 		reg:                  reg,
 		events:               make(chan ebpftracer.Event, 10000), // 参数化 eBPF 消息队列长度。chan 满后是阻塞而不是溢出。
@@ -117,8 +108,6 @@ func NewRegistry(reg prometheus.Registerer, processInfoCh chan<- ProcessInfo) (*
 		tracer: ebpftracer.NewTracer(hostNetNs, selfNetNs, *flags.DisableL7Tracing),
 
 		trafficStatsUpdateCh: make(chan *TrafficStatsUpdate),
-
-		sseBatcher: tracing.NewSSEventBatcher(tracing.SSEBatchLimit, tracing.SSEBatchTimeout, chClient),
 	}
 	if err = reg.Register(r); err != nil {
 		return nil, err
@@ -150,7 +139,6 @@ func (r *Registry) Collect(ch chan<- prometheus.Metric) {
 func (r *Registry) Close() {
 	r.tracer.Close()
 	close(r.events)
-	r.sseBatcher.Close()
 }
 
 func (r *Registry) handleEvents(ch <-chan ebpftracer.Event) {
@@ -307,9 +295,9 @@ func (r *Registry) handleEvents(ch <-chan ebpftracer.Event) {
 			case ebpftracer.EventTypeL7Response:
 				if c := r.containersByPid[e.Pid]; c != nil {
 					// 针对 L7Response 事件，e.Timestamp 是建立连接的时间，e.KernelTimestamp 是boot以来的时间。
-					sseStartTime := getRealTime(e.KernelTimestamp)
+					eventTime := getRealTime(e.KernelTimestamp)
 					// c.id 基本无用。无法用 IPPort 标识事件，因为 connectionsByPidFd 中的 PidFd 是 client-side 的，而 e.Pid 是 server-side 的。
-					r.sseBatcher.Add(sseStartTime, e.Duration, string(c.id), e.TgidReqSs, e.TgidRespSs)
+					c.tracer.ServerSpan(eventTime, e.Duration, string(c.id), e.TgidReqSs, e.TgidRespSs)
 				}
 			case ebpftracer.EventTypePythonThreadLock:
 				if c := r.containersByPid[e.Pid]; c != nil {

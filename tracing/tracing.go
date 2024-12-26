@@ -7,10 +7,12 @@ import (
 	"strconv"
 	"time"
 
+	eventv1 "github.com/StLeoX/coroot-extend-api/api/proto/coroot/event/v1"
 	"github.com/coroot/coroot-node-agent/common"
 	"github.com/coroot/coroot-node-agent/ebpftracer"
 	"github.com/coroot/coroot-node-agent/ebpftracer/l7"
 	"github.com/coroot/coroot-node-agent/flags"
+	"github.com/coroot/coroot-node-agent/tracing/event"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
@@ -19,6 +21,9 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.18.0"
 	"go.opentelemetry.io/otel/trace"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/protobuf/types/known/timestamppb"
 	"k8s.io/klog/v2"
 )
 
@@ -29,11 +34,13 @@ const (
 var (
 	batcher             sdktrace.TracerProviderOption
 	commonResourceAttrs []attribute.KeyValue
+	eventsEmitter       *event.Emitter
 	agentVersion        string
 	initialized         bool
 )
 
 func Init(machineId, hostname, version string) {
+	// About traces
 	endpointUrl := *flags.TracesEndpoint
 	if endpointUrl == nil {
 		klog.Infoln("no OpenTelemetry traces collector endpoint configured")
@@ -54,6 +61,7 @@ func Init(machineId, hostname, version string) {
 		opts = append(opts, otlptracehttp.WithInsecure())
 	}
 	client := otlptracehttp.NewClient(opts...)
+	// Construct, start a goroutine and return exporter as handler.
 	exporter, err := otlptrace.New(context.Background(), client)
 	if err != nil {
 		klog.Exitln(err)
@@ -61,12 +69,30 @@ func Init(machineId, hostname, version string) {
 
 	batcher = sdktrace.WithBatcher(exporter)
 	commonResourceAttrs = []attribute.KeyValue{semconv.HostName(hostname), semconv.HostID(machineId)}
+
+	// About events
+	endpointUrl = *flags.EventsEndpoint
+	if endpointUrl == nil {
+		klog.Infoln("no events gRPC endpoint configured")
+		return
+	}
+	conn, err := grpc.NewClient(endpointUrl.String(),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithIdleTimeout(10*time.Second))
+	if err != nil {
+		klog.Exitln(err)
+	}
+
+	// Construct and start a goroutine.
+	eventsEmitter = event.NewEmitter(conn)
+
 	agentVersion = version
 	initialized = true
 }
 
 type Tracer struct {
-	otel trace.Tracer
+	emitter *event.Emitter
+	otel    trace.Tracer
 }
 
 func GetContainerTracer(containerId string) *Tracer {
@@ -84,7 +110,8 @@ func GetContainerTracer(containerId string) *Tracer {
 			)...,
 		)),
 	)
-	return &Tracer{otel: provider.Tracer("coroot-node-agent", trace.WithInstrumentationVersion(agentVersion))}
+	return &Tracer{otel: provider.Tracer("coroot-node-agent", trace.WithInstrumentationVersion(agentVersion)),
+		emitter: eventsEmitter}
 }
 
 // NewTrace creates a new Trace, actually it's a single span.
@@ -100,6 +127,18 @@ func (t *Tracer) NewTrace(source, destination common.HostPort, startTime time.Ti
 			attribute.String("tgid_req_cs", strconv.FormatUint(raw.TgidReqCs, 10)),
 			attribute.String("tgid_resp_cs", strconv.FormatUint(raw.TgidRespCs, 10)),
 		}}
+}
+
+func (t *Tracer) ServerSpan(startTime time.Time, duration time.Duration, containerID string, TgidReqSs, TgidRespSs uint64) {
+	sse := &eventv1.ServerSpan{
+		Timestamp:   timestamppb.New(startTime),
+		Duration:    duration.Nanoseconds(),
+		ContainerId: containerID,
+		TgidRead:    strconv.FormatUint(TgidReqSs, 10),
+		TgidWrite:   strconv.FormatUint(TgidRespSs, 10),
+		RequestId:   "",
+	}
+	t.emitter.AddServerSpan(sse)
 }
 
 // Trace manages Span's resource attributes. Others manage Span's span attributes.
