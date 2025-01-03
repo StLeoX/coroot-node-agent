@@ -24,7 +24,12 @@ func NewEmitter(conn *grpc.ClientConn) *Emitter {
 	}
 
 	// start services
-	go emitter.startServerSpanService(context.Background())
+	go func() {
+		err := emitter.startServerSpanService(context.Background())
+		if err != nil {
+			klog.Error(err)
+		}
+	}()
 
 	return &emitter
 }
@@ -33,32 +38,29 @@ func (e *Emitter) AddServerSpan(sse *eventv1.ServerSpan) {
 	e.serverSpans <- sse
 }
 
-func (e *Emitter) startServerSpanService(ctx context.Context) {
+func (e *Emitter) EndServerSpan() {
+	close(e.serverSpans)
+}
+
+func (e *Emitter) startServerSpanService(ctx context.Context) error {
 	client := xcorootv1.NewServerSpanServiceClient(e.conn)
 	// todo insert grpc.Header(common.AuthHeaders())
 	stream, err := client.Upload(ctx)
 	if err != nil {
-		klog.Error(err)
-		return
+		return err
 	}
 
-	for {
-		sse, closed := <-e.serverSpans
-		// upstream closed
-		if closed {
+	for sse := range e.serverSpans {
+		err = stream.Send(&xcorootv1.ServerSpanServiceUploadRequest{Span: sse})
+		// end of downstream
+		if err == io.EOF {
 			break
 		}
-		err = stream.Send(&xcorootv1.ServerSpanServiceUploadRequest{Span: sse})
 		if err != nil {
-			klog.Error(err)
-			return
+			return err
 		}
-	}
+	} // end of upstream
 
 	_, err = stream.CloseAndRecv()
-	if err != nil {
-		if err != io.EOF {
-			klog.Error(err)
-		}
-	}
+	return err
 }

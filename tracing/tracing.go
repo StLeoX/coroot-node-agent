@@ -71,12 +71,13 @@ func Init(machineId, hostname, version string) {
 	commonResourceAttrs = []attribute.KeyValue{semconv.HostName(hostname), semconv.HostID(machineId)}
 
 	// About events
-	endpointUrl = *flags.EventsEndpoint
-	if endpointUrl == nil {
-		klog.Infoln("no events gRPC endpoint configured")
+	grpcTarget := flags.GetString(flags.GrpcEndpoint)
+	if grpcTarget == "" {
+		klog.Infoln("coroot's gRPC endpoint unconfirmed")
 		return
 	}
-	conn, err := grpc.NewClient(endpointUrl.String(),
+	klog.Infoln("coroot's gRPC endpoint:", grpcTarget)
+	conn, err := grpc.NewClient(grpcTarget,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithIdleTimeout(10*time.Second))
 	if err != nil {
@@ -127,6 +128,10 @@ func (t *Tracer) NewTrace(source, destination common.HostPort, startTime time.Ti
 			attribute.String("tgid_req_cs", strconv.FormatUint(raw.TgidReqCs, 10)),
 			attribute.String("tgid_resp_cs", strconv.FormatUint(raw.TgidRespCs, 10)),
 		}}
+}
+
+func (t *Tracer) Close() {
+	t.emitter.EndServerSpan()
 }
 
 func (t *Tracer) ServerSpan(startTime time.Time, duration time.Duration, containerID string, TgidReqSs, TgidRespSs uint64) {

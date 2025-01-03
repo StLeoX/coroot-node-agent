@@ -208,6 +208,7 @@ func (c *Container) Close() {
 		p.Stop()
 	}
 	close(c.done)
+	c.tracer.Close()
 }
 
 func (c *Container) Dead(now time.Time) bool {
