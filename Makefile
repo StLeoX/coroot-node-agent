@@ -38,4 +38,4 @@ go-test:
 
 .PHONY: docker
 docker:
-	docker build . -t registry.cn-beijing.aliyuncs.com/obser/coroot-node-agent:latest
+	docker build . -t registry.cn-beijing.aliyuncs.com/obser/coroot-node-agent:v1.24.1-fix
