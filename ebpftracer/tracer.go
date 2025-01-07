@@ -250,7 +250,7 @@ func (t *Tracer) ebpf(ch chan<- Event) error {
 		{name: "tcp_connect_events", typ: perfMapTypeTCPEvents, perCPUBufferSizePages: 8},
 		{name: "tcp_retransmit_events", typ: perfMapTypeTCPEvents, perCPUBufferSizePages: 4},
 		{name: "file_events", typ: perfMapTypeFileEvents, perCPUBufferSizePages: 4},
-		{name: "python_thread_events", typ: perfMapTypePythonThreadEvents, perCPUBufferSizePages: 4},
+		// {name: "python_thread_events", typ: perfMapTypePythonThreadEvents, perCPUBufferSizePages: 4},
 		{name: "l7_events", typ: perfMapTypeL7Events, perCPUBufferSizePages: 32},
 		{name: "l7_events_ss", typ: perfMapTypeL7SSEvents, perCPUBufferSizePages: 32},
 	}
